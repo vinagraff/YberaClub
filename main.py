@@ -2,6 +2,7 @@ import pandas as pd
 import geopandas as gpd
 from unidecode import unidecode
 import json
+import os
 
 import plotly.express as px
 import plotly.graph_objects as go
@@ -92,6 +93,21 @@ def fit_zoom(bounds):
     if span > 1:
         return 8.3
     return 9.2
+
+
+# lazy load para não bloquear o boot do gunicorn antes de bindar a porta
+df = None
+gdf_states = None
+gdf_muni = None
+muni_centroids = None
+state_centroids = None
+
+
+def ensure_data_loaded():
+    global df, gdf_states, gdf_muni, muni_centroids, state_centroids
+    if df is None:
+        df = load_data()
+        gdf_states, gdf_muni, muni_centroids, state_centroids = load_geos()
 
 
 def build_brazil_fig(df, gdf_states, state_centroids):
@@ -266,8 +282,6 @@ def build_state_fig(
 # -----------------------------
 # App
 # -----------------------------
-df = load_data()
-gdf_states, gdf_muni, muni_centroids, state_centroids = load_geos()
 
 app = Dash(__name__)
 server = app.server
@@ -320,6 +334,7 @@ app.layout = html.Div(
     State("store-view", "data"),
 )
 def update_map(clickData, n_back, view):
+    ensure_data_loaded()
     ctx = callback_context
     triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
@@ -352,8 +367,8 @@ def update_map(clickData, n_back, view):
 
 
 if __name__ == "__main__":
-    #app.run(debug=True)
-    app.run(host="0.0.0.0", port=8050)
+    port = int(os.environ.get("PORT", "8050"))
+    app.run(host="0.0.0.0", port=port)
 
 
     
