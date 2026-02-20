@@ -3,4 +3,4 @@ services:
     name: mapa-influencers
     env: python
     buildCommand: "python -m pip install --upgrade pip && pip install -r requirements.txt"
-    startCommand: "python -m pip install -r requirements.txt && gunicorn main:app.server --bind 0.0.0.0:$PORT"
+    startCommand: "gunicorn main:server --bind 0.0.0.0:$PORT"

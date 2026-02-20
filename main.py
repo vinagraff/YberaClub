@@ -1,6 +1,7 @@
 import pandas as pd
 import geopandas as gpd
 from unidecode import unidecode
+import json
 
 import plotly.express as px
 import plotly.graph_objects as go
@@ -18,6 +19,7 @@ COL_ESTADO = "estado"
 COL_CIDADE = "cidade"
 
 YEAR = 2020  # ano dos shapes (IBGE)
+MAP_STYLE = "carto-positron"
 
 
 # -----------------------------
@@ -49,6 +51,8 @@ def load_geos():
     # normalizações para join com seu excel
     gdf_states["state_name_norm"] = gdf_states["name_state"].map(norm)
     gdf_muni["muni_name_norm"] = gdf_muni["name_muni"].map(norm)
+    gdf_states["geo_id"] = gdf_states.index.astype(str)
+    gdf_muni["geo_id"] = gdf_muni.index.astype(str)
 
     # centróides (para colocar os pontos das cidades)
     muni_centroids = gdf_muni.copy()
@@ -65,6 +69,31 @@ def load_geos():
     return gdf_states, gdf_muni, muni_centroids, state_centroids
 
 
+def with_geojson_ids(gdf: gpd.GeoDataFrame):
+    geojson = json.loads(gdf.to_json())
+    for feature, geo_id in zip(geojson["features"], gdf["geo_id"].tolist()):
+        feature["id"] = str(geo_id)
+    return geojson
+
+
+def fit_zoom(bounds):
+    minx, miny, maxx, maxy = bounds
+    span = max(maxx - minx, maxy - miny)
+    if span > 25:
+        return 3.5
+    if span > 15:
+        return 4.5
+    if span > 8:
+        return 5.5
+    if span > 4:
+        return 6.5
+    if span > 2:
+        return 7.5
+    if span > 1:
+        return 8.3
+    return 9.2
+
+
 def build_brazil_fig(df, gdf_states, state_centroids):
     # agrega por estado (nome no excel) e junta com geobr por nome normalizado
     agg_state = (
@@ -76,22 +105,31 @@ def build_brazil_fig(df, gdf_states, state_centroids):
     states_plot = gdf_states.merge(agg_state, on="state_name_norm", how="left")
     states_plot[VALUE_COL] = states_plot[VALUE_COL].fillna(0)
 
-    # choropleth dos estados
-    fig = px.choropleth(
+    states_geojson = with_geojson_ids(states_plot)
+
+    fig = px.choropleth_mapbox(
         states_plot,
-        geojson=states_plot.geometry.__geo_interface__,
-        locations=states_plot.index,
+        geojson=states_geojson,
+        locations="geo_id",
+        featureidkey="id",
         color=VALUE_COL,
-        color_continuous_scale="YlOrRd",
+        color_continuous_scale="Sunsetdark",
         hover_name="name_state",
         hover_data={VALUE_COL: ":,.0f"},
         labels={VALUE_COL: "Quantidade"},
+        opacity=0.88,
+        mapbox_style=MAP_STYLE,
+        center={"lat": -14.2, "lon": -51.9},
+        zoom=3.4,
     )
 
-    fig.update_geos(
-        fitbounds="locations",
-        visible=False,
-        projection_type="mercator",
+    fig.update_layout(
+        mapbox=dict(pitch=42, bearing=-14),
+        coloraxis_colorbar=dict(
+            title="Quantidade",
+            thickness=12,
+            len=0.78,
+        ),
     )
 
     # texto com totais em cima de cada estado (centróides)
@@ -101,18 +139,21 @@ def build_brazil_fig(df, gdf_states, state_centroids):
     txt[VALUE_COL] = txt[VALUE_COL].fillna(0)
 
     fig.add_trace(
-        go.Scattergeo(
+        go.Scattermapbox(
             lat=txt["lat"],
             lon=txt["lon"],
             text=txt[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", ".")),
             mode="text",
             hoverinfo="skip",
+            textfont=dict(size=13, color="#1A2333"),
         )
     )
 
     fig.update_layout(
-        title="Brasil — Quantidade por Estado (clique em um estado para detalhar)",
-        margin=dict(l=10, r=10, t=60, b=10),
+        title="Brasil - Influencers por Estado (clique para detalhar)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=8, r=8, t=56, b=8),
     )
 
     return fig
@@ -142,50 +183,81 @@ def build_state_fig(
 
     # filtra municípios do estado e junta com os totais
     muni_state = gdf_muni[gdf_muni["abbrev_state"] == uf].copy()
+    muni_state = muni_state.merge(agg_city, on="muni_name_norm", how="left")
+    muni_state[VALUE_COL] = muni_state[VALUE_COL].fillna(0)
     pts = muni_centroids[muni_centroids["abbrev_state"] == uf].copy()
 
     pts = pts.merge(agg_city, on="muni_name_norm", how="left")
     pts[VALUE_COL] = pts[VALUE_COL].fillna(0)
 
-    # Base: polígono do estado (para dar contexto) + zoom
-    fig = px.choropleth(
+    muni_geojson = with_geojson_ids(muni_state)
+
+    fig = px.choropleth_mapbox(
         muni_state,
-        geojson=muni_state.geometry.__geo_interface__,
-        locations=muni_state.index,
-        color_discrete_sequence=["#EAEAEA"],  # só para desenhar os limites
+        geojson=muni_geojson,
+        locations="geo_id",
+        featureidkey="id",
+        color=VALUE_COL,
+        color_continuous_scale="Tealgrn",
+        opacity=0.65,
+        hover_name="name_muni",
+        hover_data={VALUE_COL: ":,.0f"},
+        mapbox_style=MAP_STYLE,
     )
 
-    fig.update_traces(marker_line_width=0.5, marker_line_color="white", hoverinfo="skip")
+    fig.update_traces(marker_line_width=0.4, marker_line_color="#F7F9FC")
 
     # pontos das cidades com tamanho proporcional
     # (só plota onde tem valor > 0)
     pts_plot = pts[pts[VALUE_COL] > 0].copy()
 
+    # camada de sombra para dar profundidade nos pontos
     fig.add_trace(
-        go.Scattergeo(
+        go.Scattermapbox(
+            lat=pts_plot["lat"] - 0.06,
+            lon=pts_plot["lon"] + 0.05,
+            mode="markers",
+            marker=dict(
+                size=(pts_plot[VALUE_COL] ** 0.5) * 2.9 + 4,
+                color="rgba(0, 0, 0, 0.18)",
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+
+    fig.add_trace(
+        go.Scattermapbox(
             lat=pts_plot["lat"],
             lon=pts_plot["lon"],
             text=pts_plot["name_muni"] + "<br>" + pts_plot[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", ".")),
             hovertemplate="%{text}<extra></extra>",
             mode="markers",
             marker=dict(
-                size=(pts_plot[VALUE_COL] ** 0.5) * 2.5,  # escala visual
-                opacity=0.75,
+                size=(pts_plot[VALUE_COL] ** 0.5) * 2.4 + 4,
+                color="#0F766E",
+                opacity=0.86,
+                line=dict(width=1.2, color="#ECFEFF"),
             ),
+            showlegend=False,
         )
     )
 
-    fig.update_geos(
-        fitbounds="locations",
-        visible=False,
-        projection_type="mercator",
+    bounds = muni_state.total_bounds
+    center = {"lat": (bounds[1] + bounds[3]) / 2, "lon": (bounds[0] + bounds[2]) / 2}
+    zoom = fit_zoom(bounds)
+    fig.update_layout(
+        mapbox=dict(center=center, zoom=zoom, pitch=50, bearing=18),
+        coloraxis_colorbar=dict(title="Qtd", thickness=10, len=0.7),
     )
 
     total_state = int(df_state[VALUE_COL].sum())
 
     fig.update_layout(
-        title=f"{state_name} — Cidades (total no estado: {total_state:,})".replace(",", "."),
-        margin=dict(l=10, r=10, t=60, b=10),
+        title=f"{state_name} - Cidades (total no estado: {total_state:,})".replace(",", "."),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=8, r=8, t=56, b=8),
         showlegend=False,
     )
     return fig
@@ -198,18 +270,44 @@ df = load_data()
 gdf_states, gdf_muni, muni_centroids, state_centroids = load_geos()
 
 app = Dash(__name__)
+server = app.server
 app.layout = html.Div(
-    style={"maxWidth": "1200px", "margin": "0 auto", "fontFamily": "Arial"},
+    style={
+        "maxWidth": "1240px",
+        "margin": "0 auto",
+        "fontFamily": "Segoe UI, sans-serif",
+        "padding": "20px 14px 26px 14px",
+        "background": "linear-gradient(140deg, #f8fafc 0%, #e2e8f0 45%, #dbeafe 100%)",
+        "borderRadius": "18px",
+        "boxShadow": "0 10px 34px rgba(15, 23, 42, 0.12)",
+    },
     children=[
         html.Div(
-            style={"display": "flex", "gap": "12px", "alignItems": "center"},
+            style={"display": "flex", "gap": "12px", "alignItems": "center", "paddingBottom": "10px"},
             children=[
-                html.Button("Voltar para Brasil", id="btn-back", n_clicks=0),
-                html.Div(id="subtitle", style={"color": "#444"}),
+                html.Button(
+                    "Voltar para Brasil",
+                    id="btn-back",
+                    n_clicks=0,
+                    style={
+                        "border": "none",
+                        "background": "#0f172a",
+                        "color": "white",
+                        "padding": "10px 14px",
+                        "borderRadius": "10px",
+                        "fontWeight": "600",
+                        "cursor": "pointer",
+                    },
+                ),
+                html.Div(id="subtitle", style={"color": "#334155", "fontWeight": "600"}),
             ],
         ),
         dcc.Store(id="store-view", data={"level": "br", "estado_norm": None}),
-        dcc.Graph(id="map", style={"height": "80vh"}),
+        dcc.Graph(
+            id="map",
+            style={"height": "80vh", "borderRadius": "14px", "overflow": "hidden"},
+            config={"displaylogo": False},
+        ),
     ],
 )
 
@@ -235,7 +333,8 @@ def update_map(clickData, n_back, view):
         # hover_name vem do 'name_state'. Vamos extrair o estado clicado:
         # O clickData do choropleth terá pointNumber = index do geodataframe usado.
         try:
-            idx = clickData["points"][0]["location"]
+            location = clickData["points"][0]["location"]
+            idx = int(location)
             estado_norm = gdf_states.iloc[idx]["state_name_norm"]
             fig = build_state_fig(df, gdf_states, gdf_muni, muni_centroids, estado_norm)
             return fig, {"level": "state", "estado_norm": estado_norm}, "Visão Estado (clique em Voltar para Brasil)"
@@ -253,4 +352,8 @@ def update_map(clickData, n_back, view):
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    #app.run(debug=True)
+    app.run(host="0.0.0.0", port=8050)
+
+
+    
