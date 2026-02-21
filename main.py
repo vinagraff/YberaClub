@@ -1,27 +1,26 @@
-import pandas as pd
-import geopandas as gpd
-from unidecode import unidecode
 import json
 import os
+from pathlib import Path
+
+import pandas as pd
+from unidecode import unidecode
 
 import plotly.express as px
 import plotly.graph_objects as go
-
 from dash import Dash, dcc, html, Input, Output, State, callback_context
-import geobr
 
 
 # -----------------------------
 # Config
 # -----------------------------
-EXCEL_PATH = "AfiliadosAtivos_EstadoCidade.xlsx"  # ajuste se precisar
+BASE_DIR = Path(__file__).resolve().parent
+EXCEL_PATH = BASE_DIR / "AfiliadosAtivos_EstadoCidade.xlsx"
+GEO_MANIFEST_PATH = BASE_DIR / "data" / "geo" / "manifest.json"
+
 VALUE_COL = "qt_influencers"
 COL_ESTADO = "estado"
 COL_CIDADE = "cidade"
-
-YEAR = 2020  # ano dos shapes (IBGE)
 MAP_STYLE = "carto-positron"
-GEO_CACHE_DIR = "/tmp/geobr_cache"
 
 
 # -----------------------------
@@ -35,69 +34,44 @@ def norm(s: str) -> str:
 
 def load_data():
     df = pd.read_excel(EXCEL_PATH)
-    # normalizações para join
     df["estado_norm"] = df[COL_ESTADO].map(norm)
     df["cidade_norm"] = df[COL_CIDADE].map(norm)
     return df
 
 
-def load_geos():
-    os.makedirs(GEO_CACHE_DIR, exist_ok=True)
-    states_cache = os.path.join(GEO_CACHE_DIR, f"states_{YEAR}.pkl")
-    muni_cache = os.path.join(GEO_CACHE_DIR, f"muni_{YEAR}.pkl")
-    muni_centroids_cache = os.path.join(GEO_CACHE_DIR, f"muni_centroids_{YEAR}.pkl")
-    state_centroids_cache = os.path.join(GEO_CACHE_DIR, f"state_centroids_{YEAR}.pkl")
-
-    cache_files = [states_cache, muni_cache, muni_centroids_cache, state_centroids_cache]
-    if all(os.path.exists(p) for p in cache_files):
-        try:
-            gdf_states = pd.read_pickle(states_cache)
-            gdf_muni = pd.read_pickle(muni_cache)
-            muni_centroids = pd.read_pickle(muni_centroids_cache)
-            state_centroids = pd.read_pickle(state_centroids_cache)
-            return gdf_states, gdf_muni, muni_centroids, state_centroids
-        except Exception:
-            pass
-
-    # Estados (UF)
-    gdf_states = geobr.read_state(year=YEAR)
-    gdf_states = gdf_states.to_crs(4674)  # lat/lon
-
-    # Municípios
-    gdf_muni = geobr.read_municipality(year=YEAR)
-    gdf_muni = gdf_muni.to_crs(4674)
-
-    # normalizações para join com seu excel
-    gdf_states["state_name_norm"] = gdf_states["name_state"].map(norm)
-    gdf_muni["muni_name_norm"] = gdf_muni["name_muni"].map(norm)
-    gdf_states["geo_id"] = gdf_states.index.astype(str)
-    gdf_muni["geo_id"] = gdf_muni.index.astype(str)
-
-    # centróides (para colocar os pontos das cidades)
-    muni_centroids = gdf_muni.copy()
-    muni_centroids["geometry"] = muni_centroids.geometry.centroid
-    muni_centroids["lat"] = muni_centroids.geometry.y
-    muni_centroids["lon"] = muni_centroids.geometry.x
-
-    # centróides dos estados (para escrever o total em cima do mapa)
-    state_centroids = gdf_states.copy()
-    state_centroids["geometry"] = state_centroids.geometry.centroid
-    state_centroids["lat"] = state_centroids.geometry.y
-    state_centroids["lon"] = state_centroids.geometry.x
-
-    gdf_states.to_pickle(states_cache)
-    gdf_muni.to_pickle(muni_cache)
-    muni_centroids.to_pickle(muni_centroids_cache)
-    state_centroids.to_pickle(state_centroids_cache)
-
-    return gdf_states, gdf_muni, muni_centroids, state_centroids
+def read_json(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def with_geojson_ids(gdf: gpd.GeoDataFrame):
-    geojson = json.loads(gdf.to_json())
-    for feature, geo_id in zip(geojson["features"], gdf["geo_id"].tolist()):
-        feature["id"] = str(geo_id)
-    return geojson
+def geojson_properties_df(geojson: dict):
+    rows = []
+    for feature in geojson.get("features", []):
+        props = dict(feature.get("properties") or {})
+        props["geo_id"] = str(feature.get("id", props.get("geo_id", "")))
+        rows.append(props)
+    return pd.DataFrame(rows)
+
+
+def _extend_bounds(coords, current):
+    if not coords:
+        return current
+    first = coords[0]
+    if isinstance(first, (int, float)):
+        lon, lat = coords
+        minx, miny, maxx, maxy = current
+        return min(minx, lon), min(miny, lat), max(maxx, lon), max(maxy, lat)
+    for item in coords:
+        current = _extend_bounds(item, current)
+    return current
+
+
+def geojson_bounds(geojson: dict):
+    bounds = (999.0, 999.0, -999.0, -999.0)
+    for feature in geojson.get("features", []):
+        geom = feature.get("geometry") or {}
+        coords = geom.get("coordinates")
+        bounds = _extend_bounds(coords, bounds)
+    return bounds
 
 
 def fit_zoom(bounds):
@@ -118,68 +92,118 @@ def fit_zoom(bounds):
     return 9.2
 
 
-# lazy load para não bloquear o boot do gunicorn antes de bindar a porta
+def error_figure(message: str):
+    fig = go.Figure()
+    fig.add_annotation(
+        text=message,
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(size=15, color="#334155"),
+    )
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    fig.update_layout(margin=dict(l=20, r=20, t=20, b=20), paper_bgcolor="white")
+    return fig
+
+
+# -----------------------------
+# Runtime state (lazy + cache)
+# -----------------------------
 df = None
-gdf_states = None
-gdf_muni = None
-muni_centroids = None
+manifest = None
+states_geojson = None
+states_df = None
 state_centroids = None
+
 state_totals = None
 city_agg_by_state = None
 state_meta = None
-muni_by_uf = None
-pts_by_uf = None
+
 muni_geojson_by_uf = None
+muni_df_by_uf = None
+pts_by_uf = None
+bounds_by_uf = None
+
 brazil_fig_cached = None
 state_fig_cache = None
+init_error = None
+
+
+def load_uf_assets(uf: str):
+    if uf in muni_geojson_by_uf:
+        return
+
+    muni_geo_path = BASE_DIR / manifest["municipalities_dir"] / f"{uf}.geojson"
+    centroids_path = BASE_DIR / manifest["centroids_dir"] / f"{uf}_centroids.csv"
+
+    muni_geo = read_json(muni_geo_path)
+    muni_geojson_by_uf[uf] = muni_geo
+    muni_df_by_uf[uf] = geojson_properties_df(muni_geo)
+    pts_by_uf[uf] = pd.read_csv(centroids_path)
+    bounds_by_uf[uf] = geojson_bounds(muni_geo)
 
 
 def ensure_data_loaded():
-    global df, gdf_states, gdf_muni, muni_centroids, state_centroids
-    global state_totals, city_agg_by_state, state_meta, muni_by_uf, pts_by_uf
-    global muni_geojson_by_uf, brazil_fig_cached, state_fig_cache
-    if df is None:
+    global df, manifest, states_geojson, states_df, state_centroids
+    global state_totals, city_agg_by_state, state_meta
+    global muni_geojson_by_uf, muni_df_by_uf, pts_by_uf, bounds_by_uf
+    global brazil_fig_cached, state_fig_cache, init_error
+
+    if df is not None or init_error is not None:
+        return
+
+    try:
+        if not GEO_MANIFEST_PATH.exists():
+            raise FileNotFoundError(
+                "Assets geográficos não encontrados. Rode: .venv/bin/python scripts/build_geo_assets.py"
+            )
+
+        manifest = read_json(GEO_MANIFEST_PATH)
+        states_geo_path = BASE_DIR / manifest["states_geojson"]
+        state_centroids_path = BASE_DIR / manifest["state_centroids_csv"]
+
+        states_geojson = read_json(states_geo_path)
+        states_df = geojson_properties_df(states_geojson)
+        state_centroids = pd.read_csv(state_centroids_path)
+
         df = load_data()
-        gdf_states, gdf_muni, muni_centroids, state_centroids = load_geos()
         state_totals = df.groupby("estado_norm")[VALUE_COL].sum()
 
-        city_agg = (
-            df.groupby(["estado_norm", "cidade_norm"], as_index=False)[VALUE_COL]
-              .sum()
-        )
+        city_agg = df.groupby(["estado_norm", "cidade_norm"], as_index=False)[VALUE_COL].sum()
         city_agg_by_state = {}
         for estado_norm, grp in city_agg.groupby("estado_norm"):
             city_agg_by_state[estado_norm] = grp.rename(
                 columns={"cidade_norm": "muni_name_norm"}
             )[["muni_name_norm", VALUE_COL]]
 
-        state_meta = {}
-        for row in gdf_states.itertuples():
-            state_meta[row.state_name_norm] = {
-                "uf": row.abbrev_state,
-                "state_name": row.name_state,
-            }
+        state_meta = {
+            key: value for key, value in manifest.get("state_meta", {}).items()
+        }
 
-        muni_by_uf = {uf: grp.copy() for uf, grp in gdf_muni.groupby("abbrev_state")}
-        pts_by_uf = {uf: grp.copy() for uf, grp in muni_centroids.groupby("abbrev_state")}
-        muni_geojson_by_uf = {uf: with_geojson_ids(grp) for uf, grp in muni_by_uf.items()}
+        muni_geojson_by_uf = {}
+        muni_df_by_uf = {}
+        pts_by_uf = {}
+        bounds_by_uf = {}
 
         brazil_fig_cached = None
         state_fig_cache = {}
 
+    except Exception as exc:
+        init_error = str(exc)
 
-def build_brazil_fig(df, gdf_states, state_centroids):
-    # agrega por estado (nome no excel) e junta com geobr por nome normalizado
+
+def build_brazil_fig():
     agg_state = (
         df.groupby("estado_norm", as_index=False)[VALUE_COL]
-          .sum()
-          .rename(columns={"estado_norm": "state_name_norm"})
+        .sum()
+        .rename(columns={"estado_norm": "state_name_norm"})
     )
 
-    states_plot = gdf_states.merge(agg_state, on="state_name_norm", how="left")
+    states_plot = states_df.merge(agg_state, on="state_name_norm", how="left")
     states_plot[VALUE_COL] = states_plot[VALUE_COL].fillna(0)
-
-    states_geojson = with_geojson_ids(states_plot)
 
     fig = px.choropleth_mapbox(
         states_plot,
@@ -200,23 +224,17 @@ def build_brazil_fig(df, gdf_states, state_centroids):
 
     fig.update_layout(
         mapbox=dict(pitch=42, bearing=-14),
-        coloraxis_colorbar=dict(
-            title="Quantidade",
-            thickness=12,
-            len=0.78,
-        ),
+        coloraxis_colorbar=dict(title="Quantidade", thickness=12, len=0.78),
     )
 
-    # texto com totais em cima de cada estado (centróides)
-    txt = state_centroids.merge(
-        agg_state, on="state_name_norm", how="left"
-    )
+    txt = state_centroids.merge(agg_state, on="state_name_norm", how="left")
     txt[VALUE_COL] = txt[VALUE_COL].fillna(0)
 
     fig.add_trace(
         go.Scattermapbox(
             lat=txt["lat"],
             lon=txt["lon"],
+            customdata=txt["state_name_norm"],
             text=txt[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", ".")),
             mode="text",
             hoverinfo="skip",
@@ -234,35 +252,31 @@ def build_brazil_fig(df, gdf_states, state_centroids):
     return fig
 
 
-def build_state_fig(
-    estado_norm: str
-):
-    if estado_norm not in state_meta:
-        # fallback
-        fig = go.Figure()
-        fig.update_layout(title="Estado não encontrado no shape.")
-        return fig
+def build_state_fig(estado_norm: str):
+    info = state_meta.get(estado_norm)
+    if not info:
+        return error_figure("Estado não encontrado.")
 
-    uf = state_meta[estado_norm]["uf"]
-    state_name = state_meta[estado_norm]["state_name"]
+    uf = info["uf"]
+    state_name = info["state_name"]
+    load_uf_assets(uf)
+
     agg_city = city_agg_by_state.get(estado_norm)
     if agg_city is None:
         agg_city = pd.DataFrame(columns=["muni_name_norm", VALUE_COL])
 
-    # filtra municípios do estado e junta com os totais
-    muni_state = muni_by_uf[uf].copy()
+    muni_state = muni_df_by_uf[uf].copy()
     muni_state = muni_state.merge(agg_city, on="muni_name_norm", how="left")
     muni_state[VALUE_COL] = muni_state[VALUE_COL].fillna(0)
-    pts = pts_by_uf[uf].copy()
 
+    pts = pts_by_uf[uf].copy()
     pts = pts.merge(agg_city, on="muni_name_norm", how="left")
     pts[VALUE_COL] = pts[VALUE_COL].fillna(0)
-
-    muni_geojson = muni_geojson_by_uf[uf]
+    pts_plot = pts[pts[VALUE_COL] > 0].copy()
 
     fig = px.choropleth_mapbox(
         muni_state,
-        geojson=muni_geojson,
+        geojson=muni_geojson_by_uf[uf],
         locations="geo_id",
         featureidkey="id",
         color=VALUE_COL,
@@ -275,11 +289,6 @@ def build_state_fig(
 
     fig.update_traces(marker_line_width=0.4, marker_line_color="#F7F9FC")
 
-    # pontos das cidades com tamanho proporcional
-    # (só plota onde tem valor > 0)
-    pts_plot = pts[pts[VALUE_COL] > 0].copy()
-
-    # camada de sombra para dar profundidade nos pontos
     fig.add_trace(
         go.Scattermapbox(
             lat=pts_plot["lat"] - 0.06,
@@ -298,7 +307,9 @@ def build_state_fig(
         go.Scattermapbox(
             lat=pts_plot["lat"],
             lon=pts_plot["lon"],
-            text=pts_plot["name_muni"] + "<br>" + pts_plot[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", ".")),
+            text=pts_plot["name_muni"]
+            + "<br>"
+            + pts_plot[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", ".")),
             hovertemplate="%{text}<extra></extra>",
             mode="markers",
             marker=dict(
@@ -311,7 +322,7 @@ def build_state_fig(
         )
     )
 
-    bounds = muni_state.total_bounds
+    bounds = bounds_by_uf[uf]
     center = {"lat": (bounds[1] + bounds[3]) / 2, "lon": (bounds[0] + bounds[2]) / 2}
     zoom = fit_zoom(bounds)
     fig.update_layout(
@@ -320,7 +331,6 @@ def build_state_fig(
     )
 
     total_state = int(state_totals.get(estado_norm, 0))
-
     fig.update_layout(
         title=f"{state_name} - Cidades (total no estado: {total_state:,})".replace(",", "."),
         paper_bgcolor="rgba(0,0,0,0)",
@@ -334,7 +344,7 @@ def build_state_fig(
 def get_brazil_fig():
     global brazil_fig_cached
     if brazil_fig_cached is None:
-        brazil_fig_cached = build_brazil_fig(df, gdf_states, state_centroids)
+        brazil_fig_cached = build_brazil_fig()
     return brazil_fig_cached
 
 
@@ -349,9 +359,9 @@ def get_state_fig(estado_norm: str):
 # -----------------------------
 # App
 # -----------------------------
-
 app = Dash(__name__)
 server = app.server
+
 app.layout = html.Div(
     style={
         "maxWidth": "1240px",
@@ -392,6 +402,7 @@ app.layout = html.Div(
     ],
 )
 
+
 @app.callback(
     Output("map", "figure"),
     Output("store-view", "data"),
@@ -402,27 +413,31 @@ app.layout = html.Div(
 )
 def update_map(clickData, n_back, view):
     ensure_data_loaded()
+
+    if init_error:
+        msg = f"Erro ao carregar dados geográficos: {init_error}"
+        return error_figure(msg), {"level": "br", "estado_norm": None}, "Erro de inicialização"
+
     ctx = callback_context
     triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
-    # Se clicou em voltar, volta para Brasil
     if triggered == "btn-back":
-        fig = get_brazil_fig()
-        return fig, {"level": "br", "estado_norm": None}, "Visão Brasil"
+        return get_brazil_fig(), {"level": "br", "estado_norm": None}, "Visão Brasil"
 
-    # Se está na visão Brasil e clicou em um estado, faz drilldown
     if view["level"] == "br" and clickData:
-        # Em mapbox, o clique pode vir do choropleth (location) ou do texto (lat/lon).
         try:
             point = clickData["points"][0]
             estado_norm = None
 
             if point.get("customdata"):
-                # custom_data foi definido no choropleth e chega como lista/tupla.
-                estado_norm = point["customdata"][0]
+                raw = point["customdata"]
+                if isinstance(raw, (list, tuple)):
+                    estado_norm = raw[0]
+                else:
+                    estado_norm = raw
             elif point.get("location") is not None:
                 location = str(point["location"])
-                match = gdf_states[gdf_states["geo_id"] == location]
+                match = states_df[states_df["geo_id"] == location]
                 if not match.empty:
                     estado_norm = match.iloc[0]["state_name_norm"]
 
@@ -432,19 +447,13 @@ def update_map(clickData, n_back, view):
         except Exception:
             pass
 
-    # Se já está em estado, mantém estado (não faz nada no click)
     if view["level"] == "state" and view["estado_norm"]:
         fig = get_state_fig(view["estado_norm"])
         return fig, view, "Visão Estado (clique em Voltar para Brasil)"
 
-    # default
-    fig = get_brazil_fig()
-    return fig, {"level": "br", "estado_norm": None}, "Visão Brasil"
+    return get_brazil_fig(), {"level": "br", "estado_norm": None}, "Visão Brasil"
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8050"))
     app.run(host="0.0.0.0", port=port)
-
-
-    
