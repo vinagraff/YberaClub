@@ -130,6 +130,7 @@ def build_brazil_fig(df, gdf_states, state_centroids):
         locations="geo_id",
         featureidkey="id",
         color=VALUE_COL,
+        custom_data=["state_name_norm"],
         color_continuous_scale="Sunsetdark",
         hover_name="name_state",
         hover_data={VALUE_COL: ":,.0f"},
@@ -351,10 +352,14 @@ def update_map(clickData, n_back, view):
             point = clickData["points"][0]
             estado_norm = None
 
-            if point.get("location") is not None:
-                idx = int(point["location"])
-                if 0 <= idx < len(gdf_states):
-                    estado_norm = gdf_states.iloc[idx]["state_name_norm"]
+            if point.get("customdata"):
+                # custom_data foi definido no choropleth e chega como lista/tupla.
+                estado_norm = point["customdata"][0]
+            elif point.get("location") is not None:
+                location = str(point["location"])
+                match = gdf_states[gdf_states["geo_id"] == location]
+                if not match.empty:
+                    estado_norm = match.iloc[0]["state_name_norm"]
             elif point.get("lon") is not None and point.get("lat") is not None:
                 p = Point(point["lon"], point["lat"])
                 match = gdf_states[gdf_states.geometry.contains(p)]
