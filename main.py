@@ -3,7 +3,6 @@ import geopandas as gpd
 from unidecode import unidecode
 import json
 import os
-from shapely.geometry import Point
 
 import plotly.express as px
 import plotly.graph_objects as go
@@ -22,6 +21,7 @@ COL_CIDADE = "cidade"
 
 YEAR = 2020  # ano dos shapes (IBGE)
 MAP_STYLE = "carto-positron"
+GEO_CACHE_DIR = "/tmp/geobr_cache"
 
 
 # -----------------------------
@@ -42,6 +42,23 @@ def load_data():
 
 
 def load_geos():
+    os.makedirs(GEO_CACHE_DIR, exist_ok=True)
+    states_cache = os.path.join(GEO_CACHE_DIR, f"states_{YEAR}.pkl")
+    muni_cache = os.path.join(GEO_CACHE_DIR, f"muni_{YEAR}.pkl")
+    muni_centroids_cache = os.path.join(GEO_CACHE_DIR, f"muni_centroids_{YEAR}.pkl")
+    state_centroids_cache = os.path.join(GEO_CACHE_DIR, f"state_centroids_{YEAR}.pkl")
+
+    cache_files = [states_cache, muni_cache, muni_centroids_cache, state_centroids_cache]
+    if all(os.path.exists(p) for p in cache_files):
+        try:
+            gdf_states = pd.read_pickle(states_cache)
+            gdf_muni = pd.read_pickle(muni_cache)
+            muni_centroids = pd.read_pickle(muni_centroids_cache)
+            state_centroids = pd.read_pickle(state_centroids_cache)
+            return gdf_states, gdf_muni, muni_centroids, state_centroids
+        except Exception:
+            pass
+
     # Estados (UF)
     gdf_states = geobr.read_state(year=YEAR)
     gdf_states = gdf_states.to_crs(4674)  # lat/lon
@@ -67,6 +84,11 @@ def load_geos():
     state_centroids["geometry"] = state_centroids.geometry.centroid
     state_centroids["lat"] = state_centroids.geometry.y
     state_centroids["lon"] = state_centroids.geometry.x
+
+    gdf_states.to_pickle(states_cache)
+    gdf_muni.to_pickle(muni_cache)
+    muni_centroids.to_pickle(muni_centroids_cache)
+    state_centroids.to_pickle(state_centroids_cache)
 
     return gdf_states, gdf_muni, muni_centroids, state_centroids
 
@@ -102,13 +124,48 @@ gdf_states = None
 gdf_muni = None
 muni_centroids = None
 state_centroids = None
+state_totals = None
+city_agg_by_state = None
+state_meta = None
+muni_by_uf = None
+pts_by_uf = None
+muni_geojson_by_uf = None
+brazil_fig_cached = None
+state_fig_cache = None
 
 
 def ensure_data_loaded():
     global df, gdf_states, gdf_muni, muni_centroids, state_centroids
+    global state_totals, city_agg_by_state, state_meta, muni_by_uf, pts_by_uf
+    global muni_geojson_by_uf, brazil_fig_cached, state_fig_cache
     if df is None:
         df = load_data()
         gdf_states, gdf_muni, muni_centroids, state_centroids = load_geos()
+        state_totals = df.groupby("estado_norm")[VALUE_COL].sum()
+
+        city_agg = (
+            df.groupby(["estado_norm", "cidade_norm"], as_index=False)[VALUE_COL]
+              .sum()
+        )
+        city_agg_by_state = {}
+        for estado_norm, grp in city_agg.groupby("estado_norm"):
+            city_agg_by_state[estado_norm] = grp.rename(
+                columns={"cidade_norm": "muni_name_norm"}
+            )[["muni_name_norm", VALUE_COL]]
+
+        state_meta = {}
+        for row in gdf_states.itertuples():
+            state_meta[row.state_name_norm] = {
+                "uf": row.abbrev_state,
+                "state_name": row.name_state,
+            }
+
+        muni_by_uf = {uf: grp.copy() for uf, grp in gdf_muni.groupby("abbrev_state")}
+        pts_by_uf = {uf: grp.copy() for uf, grp in muni_centroids.groupby("abbrev_state")}
+        muni_geojson_by_uf = {uf: with_geojson_ids(grp) for uf, grp in muni_by_uf.items()}
+
+        brazil_fig_cached = None
+        state_fig_cache = {}
 
 
 def build_brazil_fig(df, gdf_states, state_centroids):
@@ -178,37 +235,30 @@ def build_brazil_fig(df, gdf_states, state_centroids):
 
 
 def build_state_fig(
-    df, gdf_states, gdf_muni, muni_centroids, estado_norm: str
+    estado_norm: str
 ):
-    # identifica a UF no geobr
-    row_state = gdf_states.loc[gdf_states["state_name_norm"] == estado_norm]
-    if row_state.empty:
+    if estado_norm not in state_meta:
         # fallback
         fig = go.Figure()
         fig.update_layout(title="Estado não encontrado no shape.")
         return fig
 
-    uf = row_state.iloc[0]["abbrev_state"]
-    state_name = row_state.iloc[0]["name_state"]
-
-    # agrega por cidade (dentro do estado)
-    df_state = df[df["estado_norm"] == estado_norm].copy()
-    agg_city = (
-        df_state.groupby("cidade_norm", as_index=False)[VALUE_COL]
-               .sum()
-               .rename(columns={"cidade_norm": "muni_name_norm"})
-    )
+    uf = state_meta[estado_norm]["uf"]
+    state_name = state_meta[estado_norm]["state_name"]
+    agg_city = city_agg_by_state.get(estado_norm)
+    if agg_city is None:
+        agg_city = pd.DataFrame(columns=["muni_name_norm", VALUE_COL])
 
     # filtra municípios do estado e junta com os totais
-    muni_state = gdf_muni[gdf_muni["abbrev_state"] == uf].copy()
+    muni_state = muni_by_uf[uf].copy()
     muni_state = muni_state.merge(agg_city, on="muni_name_norm", how="left")
     muni_state[VALUE_COL] = muni_state[VALUE_COL].fillna(0)
-    pts = muni_centroids[muni_centroids["abbrev_state"] == uf].copy()
+    pts = pts_by_uf[uf].copy()
 
     pts = pts.merge(agg_city, on="muni_name_norm", how="left")
     pts[VALUE_COL] = pts[VALUE_COL].fillna(0)
 
-    muni_geojson = with_geojson_ids(muni_state)
+    muni_geojson = muni_geojson_by_uf[uf]
 
     fig = px.choropleth_mapbox(
         muni_state,
@@ -269,7 +319,7 @@ def build_state_fig(
         coloraxis_colorbar=dict(title="Qtd", thickness=10, len=0.7),
     )
 
-    total_state = int(df_state[VALUE_COL].sum())
+    total_state = int(state_totals.get(estado_norm, 0))
 
     fig.update_layout(
         title=f"{state_name} - Cidades (total no estado: {total_state:,})".replace(",", "."),
@@ -278,6 +328,21 @@ def build_state_fig(
         margin=dict(l=8, r=8, t=56, b=8),
         showlegend=False,
     )
+    return fig
+
+
+def get_brazil_fig():
+    global brazil_fig_cached
+    if brazil_fig_cached is None:
+        brazil_fig_cached = build_brazil_fig(df, gdf_states, state_centroids)
+    return brazil_fig_cached
+
+
+def get_state_fig(estado_norm: str):
+    if estado_norm in state_fig_cache:
+        return state_fig_cache[estado_norm]
+    fig = build_state_fig(estado_norm)
+    state_fig_cache[estado_norm] = fig
     return fig
 
 
@@ -342,7 +407,7 @@ def update_map(clickData, n_back, view):
 
     # Se clicou em voltar, volta para Brasil
     if triggered == "btn-back":
-        fig = build_brazil_fig(df, gdf_states, state_centroids)
+        fig = get_brazil_fig()
         return fig, {"level": "br", "estado_norm": None}, "Visão Brasil"
 
     # Se está na visão Brasil e clicou em um estado, faz drilldown
@@ -360,28 +425,20 @@ def update_map(clickData, n_back, view):
                 match = gdf_states[gdf_states["geo_id"] == location]
                 if not match.empty:
                     estado_norm = match.iloc[0]["state_name_norm"]
-            elif point.get("lon") is not None and point.get("lat") is not None:
-                p = Point(point["lon"], point["lat"])
-                match = gdf_states[gdf_states.geometry.contains(p)]
-                if match.empty:
-                    # fallback para cliques muito próximos de fronteiras
-                    match = gdf_states[gdf_states.geometry.buffer(0.2).contains(p)]
-                if not match.empty:
-                    estado_norm = match.iloc[0]["state_name_norm"]
 
             if estado_norm:
-                fig = build_state_fig(df, gdf_states, gdf_muni, muni_centroids, estado_norm)
+                fig = get_state_fig(estado_norm)
                 return fig, {"level": "state", "estado_norm": estado_norm}, "Visão Estado (clique em Voltar para Brasil)"
         except Exception:
             pass
 
     # Se já está em estado, mantém estado (não faz nada no click)
     if view["level"] == "state" and view["estado_norm"]:
-        fig = build_state_fig(df, gdf_states, gdf_muni, muni_centroids, view["estado_norm"])
+        fig = get_state_fig(view["estado_norm"])
         return fig, view, "Visão Estado (clique em Voltar para Brasil)"
 
     # default
-    fig = build_brazil_fig(df, gdf_states, state_centroids)
+    fig = get_brazil_fig()
     return fig, {"level": "br", "estado_norm": None}, "Visão Brasil"
 
 
