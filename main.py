@@ -3,6 +3,7 @@ import geopandas as gpd
 from unidecode import unidecode
 import json
 import os
+from shapely.geometry import Point
 
 import plotly.express as px
 import plotly.graph_objects as go
@@ -345,14 +346,27 @@ def update_map(clickData, n_back, view):
 
     # Se está na visão Brasil e clicou em um estado, faz drilldown
     if view["level"] == "br" and clickData:
-        # hover_name vem do 'name_state'. Vamos extrair o estado clicado:
-        # O clickData do choropleth terá pointNumber = index do geodataframe usado.
+        # Em mapbox, o clique pode vir do choropleth (location) ou do texto (lat/lon).
         try:
-            location = clickData["points"][0]["location"]
-            idx = int(location)
-            estado_norm = gdf_states.iloc[idx]["state_name_norm"]
-            fig = build_state_fig(df, gdf_states, gdf_muni, muni_centroids, estado_norm)
-            return fig, {"level": "state", "estado_norm": estado_norm}, "Visão Estado (clique em Voltar para Brasil)"
+            point = clickData["points"][0]
+            estado_norm = None
+
+            if point.get("location") is not None:
+                idx = int(point["location"])
+                if 0 <= idx < len(gdf_states):
+                    estado_norm = gdf_states.iloc[idx]["state_name_norm"]
+            elif point.get("lon") is not None and point.get("lat") is not None:
+                p = Point(point["lon"], point["lat"])
+                match = gdf_states[gdf_states.geometry.contains(p)]
+                if match.empty:
+                    # fallback para cliques muito próximos de fronteiras
+                    match = gdf_states[gdf_states.geometry.buffer(0.2).contains(p)]
+                if not match.empty:
+                    estado_norm = match.iloc[0]["state_name_norm"]
+
+            if estado_norm:
+                fig = build_state_fig(df, gdf_states, gdf_muni, muni_centroids, estado_norm)
+                return fig, {"level": "state", "estado_norm": estado_norm}, "Visão Estado (clique em Voltar para Brasil)"
         except Exception:
             pass
 
