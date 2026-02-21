@@ -222,24 +222,15 @@ def build_brazil_fig():
         zoom=3.4,
     )
 
+    fig.update_traces(
+        marker_line_width=0.8,
+        marker_line_color="#F8FAFC",
+        hovertemplate="<b>%{hovertext}</b><br>Quantidade: %{z:,.0f}<extra></extra>",
+    )
+
     fig.update_layout(
         mapbox=dict(pitch=42, bearing=-14),
         coloraxis_colorbar=dict(title="Quantidade", thickness=12, len=0.78),
-    )
-
-    txt = state_centroids.merge(agg_state, on="state_name_norm", how="left")
-    txt[VALUE_COL] = txt[VALUE_COL].fillna(0)
-
-    fig.add_trace(
-        go.Scattermapbox(
-            lat=txt["lat"],
-            lon=txt["lon"],
-            customdata=txt["state_name_norm"],
-            text=txt[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", ".")),
-            mode="text",
-            hoverinfo="skip",
-            textfont=dict(size=13, color="#1A2333"),
-        )
     )
 
     fig.update_layout(
