@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import numpy as np
 
 import pandas as pd
 from unidecode import unidecode
@@ -15,7 +16,7 @@ from dash import Dash, dcc, html, Input, Output, State, callback_context
 # -----------------------------
 BASE_DIR = Path(__file__).resolve().parent
 EXCEL_PATH = BASE_DIR / "AfiliadosAtivos_EstadoCidade.xlsx"
-GEO_MANIFEST_PATH = BASE_DIR / "data" / "geo" / "manifest.json"
+GEO_MANIFEST_PATH = BASE_DIR / "geo_assets" / "manifest.json"
 
 VALUE_COL = "qt_influencers"
 COL_ESTADO = "estado"
@@ -33,9 +34,17 @@ def norm(s: str) -> str:
 
 
 def load_data():
-    df = pd.read_excel(EXCEL_PATH)
+    df = pd.read_excel(EXCEL_PATH, engine="openpyxl")
+
+    # Garante tipos e remove espaços invisíveis que quebram merge/agrupamento
+    df[COL_ESTADO] = df[COL_ESTADO].astype(str).str.strip()
+    df[COL_CIDADE] = df[COL_CIDADE].astype(str).str.strip()
+    df[VALUE_COL] = pd.to_numeric(df[VALUE_COL], errors="coerce").fillna(0)
+
+    # Colunas normalizadas usadas no restante do app
     df["estado_norm"] = df[COL_ESTADO].map(norm)
     df["cidade_norm"] = df[COL_CIDADE].map(norm)
+
     return df
 
 
@@ -47,7 +56,15 @@ def geojson_properties_df(geojson: dict):
     rows = []
     for feature in geojson.get("features", []):
         props = dict(feature.get("properties") or {})
-        props["geo_id"] = str(feature.get("id", props.get("geo_id", "")))
+        # Alguns GeoJSONs do geobr não têm feature.id; usa fallback estável.
+        fid = feature.get("id")
+        if fid in (None, ""):
+            fid = props.get("geo_id")
+        if fid in (None, ""):
+            fid = props.get("code_muni")
+        if fid in (None, ""):
+            fid = props.get("code_state")
+        props["geo_id"] = "" if fid is None else str(fid)
         rows.append(props)
     return pd.DataFrame(rows)
 
@@ -109,6 +126,58 @@ def error_figure(message: str):
     return fig
 
 
+def format_br_int(value) -> str:
+    return f"{int(round(float(value))):,}".replace(",", ".")
+
+
+def build_rank_list(df_rank: pd.DataFrame, name_col: str):
+    if df_rank.empty:
+        return [html.Li("Sem dados", style={"color": "#64748b"})]
+
+    items = []
+    for _, row in df_rank.iterrows():
+        items.append(
+            html.Li(
+                [
+                    html.Span(str(row[name_col]), style={"fontWeight": "600", "color": "#0f172a"}),
+                    html.Span(
+                        format_br_int(row[VALUE_COL]),
+                        style={"float": "right", "color": "#0f766e", "fontWeight": "700"},
+                    ),
+                ],
+                style={"padding": "4px 0", "borderBottom": "1px dashed #e2e8f0"},
+            )
+        )
+    return items
+
+
+def build_rankings(view: dict):
+    states_rank = (
+        df.groupby(COL_ESTADO, as_index=False)[VALUE_COL]
+        .sum()
+        .sort_values(VALUE_COL, ascending=False)
+        .head(10)
+    )
+
+    if view and view.get("level") == "state" and view.get("estado_norm"):
+        df_city_base = df[df["estado_norm"] == view["estado_norm"]]
+        city_title = "Top 10 Cidades (estado)"
+    else:
+        df_city_base = df
+        city_title = "Top 10 Cidades (Brasil)"
+
+    cities_rank = (
+        df_city_base.groupby(COL_CIDADE, as_index=False)[VALUE_COL]
+        .sum()
+        .sort_values(VALUE_COL, ascending=False)
+        .head(10)
+    )
+
+    states_children = build_rank_list(states_rank, COL_ESTADO)
+    cities_children = build_rank_list(cities_rank, COL_CIDADE)
+    return states_children, cities_children, city_title
+
+
 # -----------------------------
 # Runtime state (lazy + cache)
 # -----------------------------
@@ -136,7 +205,11 @@ def load_uf_assets(uf: str):
     if uf in muni_geojson_by_uf:
         return
 
-    muni_geo_path = BASE_DIR / manifest["municipalities_dir"] / f"{uf}.geojson"
+    muni_dir = manifest.get("muni_geojson_dir") or manifest.get("municipalities_dir")
+    if not muni_dir:
+        raise KeyError("Manifest sem chave de diretório dos municípios (muni_geojson_dir/municipalities_dir).")
+
+    muni_geo_path = BASE_DIR / muni_dir / f"{uf}.geojson"
     centroids_path = BASE_DIR / manifest["centroids_dir"] / f"{uf}_centroids.csv"
 
     muni_geo = read_json(muni_geo_path)
@@ -167,6 +240,19 @@ def ensure_data_loaded():
 
         states_geojson = read_json(states_geo_path)
         states_df = geojson_properties_df(states_geojson)
+        # garante coluna usada nos merges
+        if "state_name_norm" not in states_df.columns:
+            # tenta inferir a coluna de nome do estado vinda do geojson
+            if "name_state" in states_df.columns:
+                states_df["state_name_norm"] = states_df["name_state"].map(norm)
+            elif "nome" in states_df.columns:
+                states_df["state_name_norm"] = states_df["nome"].map(norm)
+            elif "NAME" in states_df.columns:
+                states_df["state_name_norm"] = states_df["NAME"].map(norm)
+            else:
+                raise KeyError(
+                    f"Não encontrei coluna de nome do estado em states_df. Colunas disponíveis: {list(states_df.columns)}"
+                )
         state_centroids = pd.read_csv(state_centroids_path)
 
         df = load_data()
@@ -203,13 +289,13 @@ def build_brazil_fig():
     )
 
     states_plot = states_df.merge(agg_state, on="state_name_norm", how="left")
-    states_plot[VALUE_COL] = states_plot[VALUE_COL].fillna(0)
+    states_plot[VALUE_COL] = states_plot[VALUE_COL].fillna(0).astype(float)
 
     fig = px.choropleth_mapbox(
         states_plot,
         geojson=states_geojson,
-        locations="geo_id",
-        featureidkey="id",
+        locations="abbrev_state",
+        featureidkey="properties.abbrev_state",
         color=VALUE_COL,
         custom_data=["state_name_norm"],
         color_continuous_scale="Sunsetdark",
@@ -233,104 +319,215 @@ def build_brazil_fig():
         coloraxis_colorbar=dict(title="Quantidade", thickness=12, len=0.78),
     )
 
-    fig.update_layout(
-        title="Brasil - Influencers por Estado (clique para detalhar)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=8, r=8, t=56, b=8),
+    # Rótulos de total por estado no próprio mapa.
+    labels = (
+        state_centroids.merge(
+            states_plot[["abbrev_state", VALUE_COL]],
+            on="abbrev_state",
+            how="left",
+        )
+        .fillna({VALUE_COL: 0})
+        .copy()
     )
-
-    return fig
-
-
-def build_state_fig(estado_norm: str):
-    info = state_meta.get(estado_norm)
-    if not info:
-        return error_figure("Estado não encontrado.")
-
-    uf = info["uf"]
-    state_name = info["state_name"]
-    load_uf_assets(uf)
-
-    agg_city = city_agg_by_state.get(estado_norm)
-    if agg_city is None:
-        agg_city = pd.DataFrame(columns=["muni_name_norm", VALUE_COL])
-
-    muni_state = muni_df_by_uf[uf].copy()
-    muni_state = muni_state.merge(agg_city, on="muni_name_norm", how="left")
-    muni_state[VALUE_COL] = muni_state[VALUE_COL].fillna(0)
-
-    pts = pts_by_uf[uf].copy()
-    pts = pts.merge(agg_city, on="muni_name_norm", how="left")
-    pts[VALUE_COL] = pts[VALUE_COL].fillna(0)
-    pts_plot = pts[pts[VALUE_COL] > 0].copy()
-
-    fig = px.choropleth_mapbox(
-        muni_state,
-        geojson=muni_geojson_by_uf[uf],
-        locations="geo_id",
-        featureidkey="id",
-        color=VALUE_COL,
-        color_continuous_scale="Tealgrn",
-        opacity=0.65,
-        hover_name="name_muni",
-        hover_data={VALUE_COL: ":,.0f"},
-        mapbox_style=MAP_STYLE,
+    labels["label"] = (
+        labels["abbrev_state"].astype(str)
+        + "<br>"
+        + labels[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
     )
-
-    fig.update_traces(marker_line_width=0.4, marker_line_color="#F7F9FC")
 
     fig.add_trace(
         go.Scattermapbox(
-            lat=pts_plot["lat"] - 0.06,
-            lon=pts_plot["lon"] + 0.05,
-            mode="markers",
-            marker=dict(
-                size=(pts_plot[VALUE_COL] ** 0.5) * 2.9 + 4,
-                color="rgba(0, 0, 0, 0.18)",
-            ),
+            lat=labels["lat"],
+            lon=labels["lon"],
+            mode="text",
+            text=labels["label"],
+            textfont=dict(size=10, color="#0f172a"),
             hoverinfo="skip",
             showlegend=False,
         )
     )
 
+    total_brasil = int(df[VALUE_COL].sum())
+
+    fig.update_layout(
+        title="Brasil - Influencers por Estado (clique para detalhar)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=8, r=8, t=56, b=8),
+        annotations=[
+            dict(
+                x=0.01,
+                y=0.02,
+                xref="paper",
+                yref="paper",
+                xanchor="left",
+                yanchor="bottom",
+                showarrow=False,
+                align="left",
+                bgcolor="rgba(255,255,255,0.92)",
+                bordercolor="#cbd5e1",
+                borderwidth=1,
+                borderpad=5,
+                font=dict(size=12, color="#0f172a"),
+                text=f"Total Brasil: {total_brasil:,}".replace(",", "."),
+            )
+        ],
+    )
+
+    return fig
+
+
+def build_state_fig_by_uf(uf: str):
+    uf = str(uf).strip().upper()
+
+    # pega nome do estado (só pra título)
+    row = states_df.loc[states_df["abbrev_state"].astype(str).str.upper() == uf]
+    if row.empty:
+        fig = go.Figure()
+        fig.update_layout(title=f"UF não encontrada: {uf}")
+        return fig
+
+    state_name = row.iloc[0]["name_state"]
+
+    # Se você usa muni_geojson_by_uf/pts_by_uf indexados por UF, pronto:
+    if uf not in muni_geojson_by_uf or uf not in pts_by_uf:
+        fig = go.Figure()
+        fig.update_layout(title=f"Assets do estado não encontrados para UF: {uf}")
+        return fig
+
+    # Descobre o estado_norm correto a partir do states_df (sem risco)
+    estado_norm = row.iloc[0]["state_name_norm"]
+
+    # agrega por cidade dentro do estado (usando estado_norm correto)
+    df_state = df[df["estado_norm"] == estado_norm].copy()
+    agg_city = (
+        df_state.groupby("cidade_norm", as_index=False)[VALUE_COL]
+               .sum()
+               .rename(columns={"cidade_norm": "muni_name_norm"})
+    )
+
+    pts = pts_by_uf[uf].copy()
+    pts["muni_name_norm"] = pts["name_muni"].map(norm)
+    pts = pts.merge(agg_city, on="muni_name_norm", how="left")
+    pts[VALUE_COL] = pts[VALUE_COL].fillna(0)
+    pts = pts[pts[VALUE_COL] > 0].copy()
+
+    muni_geo = muni_geojson_by_uf[uf]
+    muni_df = muni_df_by_uf[uf]
+    min_lon, min_lat, max_lon, max_lat = bounds_by_uf[uf]
+    center_lat = (min_lat + max_lat) / 2
+    center_lon = (min_lon + max_lon) / 2
+
+    fig = go.Figure()
+
+    # base municípios (cinza claro)
+    fig.add_trace(
+        go.Choroplethmapbox(
+            geojson=muni_geo,
+            locations=muni_df["geo_id"],
+            featureidkey="properties.geo_id",
+            z=[1] * len(muni_df),
+            colorscale=[[0, "#EDEDED"], [1, "#EDEDED"]],
+            showscale=False,
+            marker_line_width=0.6,
+            marker_line_color="rgba(0,0,0,0.18)",
+            hoverinfo="skip",
+            name="Municípios",
+            showlegend=True,
+        )
+    )
+
+    sizes = (pts[VALUE_COL].astype(float).clip(lower=1) ** 0.5) * 4.0
+    hover_txt = pts["name_muni"] + "<br>Total: " + pts[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
+
     fig.add_trace(
         go.Scattermapbox(
-            lat=pts_plot["lat"],
-            lon=pts_plot["lon"],
-            text=pts_plot["name_muni"]
-            + "<br>"
-            + pts_plot[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", ".")),
-            hovertemplate="%{text}<extra></extra>",
+            lat=pts["lat"],
+            lon=pts["lon"],
             mode="markers",
             marker=dict(
-                size=(pts_plot[VALUE_COL] ** 0.5) * 2.4 + 4,
-                color="#0F766E",
-                opacity=0.86,
-                line=dict(width=1.2, color="#ECFEFF"),
+                size=sizes,
+                color=pts[VALUE_COL],
+                colorscale="Tealgrn",
+                cmin=0,
+                cmax=max(float(pts[VALUE_COL].max()), 1.0),
+                opacity=0.78,
+                showscale=True,
+                colorbar=dict(title="Quantidade", thickness=12, len=0.75),
             ),
+            text=hover_txt,
+            hovertemplate="%{text}<extra></extra>",
+            name="Total por cidade",
+            showlegend=True,
+        )
+    )
+
+    top_labels = pts.nlargest(12, VALUE_COL).copy()
+    top_labels["label"] = top_labels[VALUE_COL].round(0).astype(int).map(
+        lambda x: f"{x:,}".replace(",", ".")
+    )
+    fig.add_trace(
+        go.Scattermapbox(
+            lat=top_labels["lat"],
+            lon=top_labels["lon"],
+            mode="text",
+            text=top_labels["label"],
+            textfont=dict(size=10, color="#0f172a"),
+            hoverinfo="skip",
+            name="Totais (top 12)",
             showlegend=False,
         )
     )
 
-    bounds = bounds_by_uf[uf]
-    center = {"lat": (bounds[1] + bounds[3]) / 2, "lon": (bounds[0] + bounds[2]) / 2}
-    zoom = fit_zoom(bounds)
+    total_state = int(df_state[VALUE_COL].sum())
+
     fig.update_layout(
-        mapbox=dict(center=center, zoom=zoom, pitch=50, bearing=18),
-        coloraxis_colorbar=dict(title="Qtd", thickness=10, len=0.7),
+        title=dict(
+            text=f"{state_name} — Cidades (total: {total_state:,})".replace(",", "."),
+            x=0.5, xanchor="center"
+        ),
+        margin=dict(l=10, r=10, t=60, b=10),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        mapbox=dict(
+            style="carto-positron",
+            center=dict(lat=center_lat, lon=center_lon),
+            zoom=5.3,
+            pitch=35,
+            bearing=0,
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=0.01,
+            xanchor="left",
+            x=0.01,
+            bgcolor="rgba(255,255,255,0.86)",
+            bordercolor="#cbd5e1",
+            borderwidth=1,
+        ),
+        annotations=[
+            dict(
+                x=0.01,
+                y=0.02,
+                xref="paper",
+                yref="paper",
+                xanchor="left",
+                yanchor="bottom",
+                showarrow=False,
+                align="left",
+                bgcolor="rgba(255,255,255,0.92)",
+                bordercolor="#cbd5e1",
+                borderwidth=1,
+                borderpad=5,
+                font=dict(size=12, color="#0f172a"),
+                text=f"Total do estado: {total_state:,}".replace(",", "."),
+            )
+        ],
+        showlegend=True,
     )
 
-    total_state = int(state_totals.get(estado_norm, 0))
-    fig.update_layout(
-        title=f"{state_name} - Cidades (total no estado: {total_state:,})".replace(",", "."),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=8, r=8, t=56, b=8),
-        showlegend=False,
-    )
     return fig
-
 
 def get_brazil_fig():
     global brazil_fig_cached
@@ -340,9 +537,18 @@ def get_brazil_fig():
 
 
 def get_state_fig(estado_norm: str):
+    if not estado_norm:
+        return get_brazil_fig()
     if estado_norm in state_fig_cache:
         return state_fig_cache[estado_norm]
-    fig = build_state_fig(estado_norm)
+
+    row = states_df.loc[states_df["state_name_norm"] == estado_norm]
+    if row.empty:
+        return error_figure(f"Estado não encontrado para drilldown: {estado_norm}")
+
+    uf = str(row.iloc[0]["abbrev_state"]).upper().strip()
+    load_uf_assets(uf)
+    fig = build_state_fig_by_uf(uf)
     state_fig_cache[estado_norm] = fig
     return fig
 
@@ -385,10 +591,65 @@ app.layout = html.Div(
             ],
         ),
         dcc.Store(id="store-view", data={"level": "br", "estado_norm": None}),
-        dcc.Graph(
-            id="map",
-            style={"height": "80vh", "borderRadius": "14px", "overflow": "hidden"},
-            config={"displaylogo": False},
+        html.Div(
+            style={"display": "flex", "gap": "14px", "alignItems": "stretch", "flexWrap": "wrap"},
+            children=[
+                dcc.Graph(
+                    id="map",
+                    style={"height": "80vh", "borderRadius": "14px", "overflow": "hidden", "flex": "1 1 760px"},
+                    config={"displaylogo": False},
+                ),
+                html.Div(
+                    style={
+                        "flex": "0 0 320px",
+                        "minWidth": "280px",
+                        "background": "rgba(255,255,255,0.88)",
+                        "border": "1px solid #cbd5e1",
+                        "borderRadius": "14px",
+                        "padding": "12px",
+                        "boxShadow": "0 8px 20px rgba(15, 23, 42, 0.08)",
+                    },
+                    children=[
+                        html.Div(
+                            style={
+                                "background": "#ffffff",
+                                "border": "1px solid #dbe4ef",
+                                "borderRadius": "12px",
+                                "padding": "10px 12px",
+                                "marginBottom": "12px",
+                            },
+                            children=[
+                                html.Div(
+                                    "Ranking Nacional",
+                                    style={"fontSize": "12px", "fontWeight": "700", "letterSpacing": "0.4px", "color": "#64748b", "textTransform": "uppercase"},
+                                ),
+                                html.H4("Top 10 Estados", style={"margin": "6px 0 10px 0", "color": "#0f172a"}),
+                                html.Ol(id="rank-states", style={"margin": "0 0 0 18px", "padding": 0}),
+                            ],
+                        ),
+                        html.Div(
+                            style={
+                                "background": "#ffffff",
+                                "border": "1px solid #dbe4ef",
+                                "borderRadius": "12px",
+                                "padding": "10px 12px",
+                            },
+                            children=[
+                                html.Div(
+                                    "Ranking de Cidades",
+                                    style={"fontSize": "12px", "fontWeight": "700", "letterSpacing": "0.4px", "color": "#64748b", "textTransform": "uppercase"},
+                                ),
+                                html.H4(
+                                    id="rank-cities-title",
+                                    children="Top 10 Cidades (Brasil)",
+                                    style={"margin": "6px 0 10px 0", "color": "#0f172a"},
+                                ),
+                                html.Ol(id="rank-cities", style={"margin": "0 0 0 18px", "padding": 0}),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
         ),
     ],
 )
@@ -398,6 +659,9 @@ app.layout = html.Div(
     Output("map", "figure"),
     Output("store-view", "data"),
     Output("subtitle", "children"),
+    Output("rank-states", "children"),
+    Output("rank-cities", "children"),
+    Output("rank-cities-title", "children"),
     Input("map", "clickData"),
     Input("btn-back", "n_clicks"),
     State("store-view", "data"),
@@ -407,13 +671,22 @@ def update_map(clickData, n_back, view):
 
     if init_error:
         msg = f"Erro ao carregar dados geográficos: {init_error}"
-        return error_figure(msg), {"level": "br", "estado_norm": None}, "Erro de inicialização"
+        return (
+            error_figure(msg),
+            {"level": "br", "estado_norm": None},
+            "Erro de inicialização",
+            [html.Li("Erro ao carregar dados")],
+            [html.Li("Erro ao carregar dados")],
+            "Top 10 Cidades",
+        )
 
     ctx = callback_context
     triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
     if triggered == "btn-back":
-        return get_brazil_fig(), {"level": "br", "estado_norm": None}, "Visão Brasil"
+        new_view = {"level": "br", "estado_norm": None}
+        rs, rc, ctitle = build_rankings(new_view)
+        return get_brazil_fig(), new_view, "Visão Brasil", rs, rc, ctitle
 
     if view["level"] == "br" and clickData:
         try:
@@ -434,15 +707,20 @@ def update_map(clickData, n_back, view):
 
             if estado_norm:
                 fig = get_state_fig(estado_norm)
-                return fig, {"level": "state", "estado_norm": estado_norm}, "Visão Estado (clique em Voltar para Brasil)"
+                new_view = {"level": "state", "estado_norm": estado_norm}
+                rs, rc, ctitle = build_rankings(new_view)
+                return fig, new_view, "Visão Estado (clique em Voltar para Brasil)", rs, rc, ctitle
         except Exception:
             pass
 
     if view["level"] == "state" and view["estado_norm"]:
         fig = get_state_fig(view["estado_norm"])
-        return fig, view, "Visão Estado (clique em Voltar para Brasil)"
+        rs, rc, ctitle = build_rankings(view)
+        return fig, view, "Visão Estado (clique em Voltar para Brasil)", rs, rc, ctitle
 
-    return get_brazil_fig(), {"level": "br", "estado_norm": None}, "Visão Brasil"
+    new_view = {"level": "br", "estado_norm": None}
+    rs, rc, ctitle = build_rankings(new_view)
+    return get_brazil_fig(), new_view, "Visão Brasil", rs, rc, ctitle
 
 
 if __name__ == "__main__":
