@@ -301,67 +301,44 @@ def ensure_data_loaded():
 
 
 def build_brazil_fig():
-    agg_state = (
-        df.groupby("estado_norm", as_index=False)[VALUE_COL]
-        .sum()
-        .rename(columns={"estado_norm": "state_name_norm"})
+    agg_state = df.groupby("estado_norm", as_index=False)[VALUE_COL].sum()
+    states_plot = (
+        state_centroids.copy()
+        .assign(state_name_norm=lambda d: d["name_state"].map(norm))
+        .merge(agg_state.rename(columns={"estado_norm": "state_name_norm"}), on="state_name_norm", how="left")
     )
-
-    states_plot = states_df.merge(agg_state, on="state_name_norm", how="left")
     states_plot[VALUE_COL] = states_plot[VALUE_COL].fillna(0).astype(float)
 
-    fig = px.choropleth_mapbox(
-        states_plot,
-        geojson=states_geojson,
-        locations="abbrev_state",
-        featureidkey="properties.abbrev_state",
-        color=VALUE_COL,
-        custom_data=["state_name_norm"],
-        color_continuous_scale="Sunsetdark",
-        hover_name="name_state",
-        hover_data={VALUE_COL: ":,.0f"},
-        labels={VALUE_COL: "Quantidade"},
-        opacity=0.88,
-        mapbox_style=MAP_STYLE,
-        center={"lat": -14.2, "lon": -51.9},
-        zoom=3.4,
+    sizes = (states_plot[VALUE_COL].clip(lower=1) ** 0.5) * 1.9 + 7
+    hover_txt = (
+        states_plot["name_state"].astype(str)
+        + "<br>Total: "
+        + states_plot[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
     )
 
-    fig.update_traces(
-        marker_line_width=0.8,
-        marker_line_color="#F8FAFC",
-        hovertemplate="<b>%{hovertext}</b><br>Quantidade: %{z:,.0f}<extra></extra>",
-    )
-
-    fig.update_layout(
-        mapbox=dict(pitch=42, bearing=-14),
-        coloraxis_colorbar=dict(title="Quantidade", thickness=12, len=0.78),
-    )
-
-    # Rótulos de total por estado no próprio mapa.
-    labels = (
-        state_centroids.merge(
-            states_plot[["abbrev_state", VALUE_COL]],
-            on="abbrev_state",
-            how="left",
-        )
-        .fillna({VALUE_COL: 0})
-        .copy()
-    )
-    labels["label"] = (
-        labels["abbrev_state"].astype(str)
-        + "<br>"
-        + labels[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
-    )
-
+    fig = go.Figure()
     fig.add_trace(
         go.Scattermapbox(
-            lat=labels["lat"],
-            lon=labels["lon"],
-            mode="text",
-            text=labels["label"],
+            lat=states_plot["lat"],
+            lon=states_plot["lon"],
+            mode="markers+text",
+            customdata=np.stack([states_plot["state_name_norm"]], axis=-1),
+            text=states_plot["abbrev_state"],
+            textposition="top center",
             textfont=dict(size=10, color="#0f172a"),
-            hoverinfo="skip",
+            marker=dict(
+                size=sizes,
+                color=states_plot[VALUE_COL],
+                colorscale="Sunsetdark",
+                cmin=0,
+                cmax=max(float(states_plot[VALUE_COL].max()), 1.0),
+                opacity=0.85,
+                showscale=True,
+                colorbar=dict(title="Quantidade", thickness=12, len=0.78),
+            ),
+            hovertemplate="%{text}<br>%{customdata[0]}<br>%{hovertext}<extra></extra>",
+            hovertext=hover_txt,
+            name="Estados",
             showlegend=False,
         )
     )
@@ -370,6 +347,13 @@ def build_brazil_fig():
 
     fig.update_layout(
         title="Brasil - Influencers por Estado (clique para detalhar)",
+        mapbox=dict(
+            style=MAP_STYLE,
+            center={"lat": -14.2, "lon": -51.9},
+            zoom=3.4,
+            pitch=18,
+            bearing=0,
+        ),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=8, r=8, t=56, b=8),
