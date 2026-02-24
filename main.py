@@ -583,6 +583,29 @@ def get_state_fig(estado_norm: str):
 
 
 # -----------------------------
+# Initial payload (no callback)
+# -----------------------------
+def get_initial_ui_payload():
+    ensure_data_loaded()
+    if init_error:
+        msg = f"Erro ao carregar dados geográficos: {init_error}"
+        return (
+            error_figure(msg),
+            "Erro de inicialização",
+            [html.Li("Erro ao carregar dados")],
+            [html.Li("Erro ao carregar dados")],
+            "Top 10 Cidades",
+        )
+
+    view = {"level": "br", "estado_norm": None}
+    rs, rc, ctitle = build_rankings(view)
+    return get_brazil_fig(), "Visão Brasil", rs, rc, ctitle
+
+
+INITIAL_FIG, INITIAL_SUBTITLE, INITIAL_RANK_STATES, INITIAL_RANK_CITIES, INITIAL_RANK_CITIES_TITLE = get_initial_ui_payload()
+
+
+# -----------------------------
 # App
 # -----------------------------
 app = Dash(__name__)
@@ -616,7 +639,7 @@ app.layout = html.Div(
                         "cursor": "pointer",
                     },
                 ),
-                html.Div(id="subtitle", style={"color": "#334155", "fontWeight": "600"}),
+                html.Div(id="subtitle", children=INITIAL_SUBTITLE, style={"color": "#334155", "fontWeight": "600"}),
             ],
         ),
         dcc.Store(id="store-view", data={"level": "br", "estado_norm": None}),
@@ -627,6 +650,7 @@ app.layout = html.Div(
                     id="map",
                     style={"height": "80vh", "borderRadius": "14px", "overflow": "hidden", "flex": "1 1 760px"},
                     config={"displaylogo": False},
+                    figure=INITIAL_FIG,
                 ),
                 html.Div(
                     style={
@@ -653,7 +677,7 @@ app.layout = html.Div(
                                     style={"fontSize": "12px", "fontWeight": "700", "letterSpacing": "0.4px", "color": "#64748b", "textTransform": "uppercase"},
                                 ),
                                 html.H4("Top 10 Estados", style={"margin": "6px 0 10px 0", "color": "#0f172a"}),
-                                html.Ol(id="rank-states", style={"margin": "0 0 0 18px", "padding": 0}),
+                                html.Ol(id="rank-states", style={"margin": "0 0 0 18px", "padding": 0}, children=INITIAL_RANK_STATES),
                             ],
                         ),
                         html.Div(
@@ -670,10 +694,10 @@ app.layout = html.Div(
                                 ),
                                 html.H4(
                                     id="rank-cities-title",
-                                    children="Top 10 Cidades (Brasil)",
+                                    children=INITIAL_RANK_CITIES_TITLE,
                                     style={"margin": "6px 0 10px 0", "color": "#0f172a"},
                                 ),
-                                html.Ol(id="rank-cities", style={"margin": "0 0 0 18px", "padding": 0}),
+                                html.Ol(id="rank-cities", style={"margin": "0 0 0 18px", "padding": 0}, children=INITIAL_RANK_CITIES),
                             ],
                         ),
                     ],
@@ -694,6 +718,7 @@ app.layout = html.Div(
     Input("map", "clickData"),
     Input("btn-back", "n_clicks"),
     State("store-view", "data"),
+    prevent_initial_call=True,
 )
 def update_map(clickData, n_back, view):
     try:
