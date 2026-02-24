@@ -90,6 +90,38 @@ def geojson_bounds(geojson: dict):
     return bounds
 
 
+def geojson_to_line_coords(geojson: dict, step: int = 14, precision: int = 2):
+    lons = []
+    lats = []
+
+    def add_ring(ring):
+        if not ring:
+            return
+        n = len(ring)
+        idxs = list(range(0, n, step))
+        if idxs[-1] != n - 1:
+            idxs.append(n - 1)
+        for i in idxs:
+            lon, lat = ring[i]
+            lons.append(round(float(lon), precision))
+            lats.append(round(float(lat), precision))
+        lons.append(None)
+        lats.append(None)
+
+    for feature in geojson.get("features", []):
+        geom = feature.get("geometry") or {}
+        gtype = geom.get("type")
+        coords = geom.get("coordinates") or []
+        if gtype == "Polygon":
+            for ring in coords:
+                add_ring(ring)
+        elif gtype == "MultiPolygon":
+            for poly in coords:
+                for ring in poly:
+                    add_ring(ring)
+    return lons, lats
+
+
 def fit_zoom(bounds):
     minx, miny, maxx, maxy = bounds
     span = max(maxx - minx, maxy - miny)
@@ -185,6 +217,7 @@ manifest = None
 states_geojson = None
 states_df = None
 state_centroids = None
+state_border_lines = None
 
 state_totals = None
 city_agg_by_state = None
@@ -219,7 +252,7 @@ def load_uf_assets(uf: str):
 
 
 def ensure_data_loaded():
-    global df, manifest, states_geojson, states_df, state_centroids
+    global df, manifest, states_geojson, states_df, state_centroids, state_border_lines
     global state_totals, city_agg_by_state, state_meta
     global muni_geojson_by_uf, muni_df_by_uf, pts_by_uf, bounds_by_uf
     global brazil_fig_cached, state_fig_cache, init_error
@@ -239,6 +272,7 @@ def ensure_data_loaded():
 
         states_geojson = read_json(states_geo_path)
         states_df = geojson_properties_df(states_geojson)
+        state_border_lines = geojson_to_line_coords(states_geojson, step=14, precision=2)
         # garante coluna usada nos merges
         if "state_name_norm" not in states_df.columns:
             # tenta inferir a coluna de nome do estado vinda do geojson
@@ -310,19 +344,18 @@ def build_brazil_fig():
     mask_dark = norm_vals >= 0.55
 
     fig = go.Figure()
-    fig.add_trace(
-        go.Choropleth(
-            geojson=states_geojson,
-            locations=states_df["abbrev_state"],
-            featureidkey="properties.abbrev_state",
-            z=[0] * len(states_df),
-            colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
-            showscale=False,
-            marker_line_width=1.0,
-            marker_line_color="rgba(100,116,139,0.40)",
-            hoverinfo="skip",
+    if state_border_lines:
+        lon_lines, lat_lines = state_border_lines
+        fig.add_trace(
+            go.Scattergeo(
+                lon=lon_lines,
+                lat=lat_lines,
+                mode="lines",
+                line=dict(color="rgba(100,116,139,0.40)", width=0.8),
+                hoverinfo="skip",
+                showlegend=False,
+            )
         )
-    )
     countries = pd.DataFrame(
         [
             {"name": "Brasil", "lat": -10.0, "lon": -53.0},
