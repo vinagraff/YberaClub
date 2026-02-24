@@ -2,7 +2,6 @@ import json
 import os
 import traceback
 from pathlib import Path
-import numpy as np
 
 import pandas as pd
 from unidecode import unidecode
@@ -23,7 +22,7 @@ VALUE_COL = "qt_influencers"
 COL_ESTADO = "estado"
 COL_CIDADE = "cidade"
 MAP_STYLE = "carto-positron"
-MAX_STATE_POINTS = int(os.environ.get("MAX_STATE_POINTS", "500"))
+GEO_ASSETS_BASE_URL = os.environ.get("GEO_ASSETS_BASE_URL", "").strip().rstrip("/")
 
 
 # -----------------------------
@@ -52,6 +51,13 @@ def load_data():
 
 def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def asset_url_from_relpath(rel_path: str):
+    if not GEO_ASSETS_BASE_URL:
+        return None
+    rel = str(rel_path).replace("\\", "/").lstrip("./")
+    return f"{GEO_ASSETS_BASE_URL}/{rel}"
 
 
 def geojson_properties_df(geojson: dict):
@@ -186,6 +192,7 @@ def build_rankings(view: dict):
 df = None
 manifest = None
 states_geojson = None
+states_geojson_source = None
 states_df = None
 state_centroids = None
 
@@ -194,6 +201,7 @@ city_agg_by_state = None
 state_meta = None
 
 muni_geojson_by_uf = None
+muni_geojson_source_by_uf = None
 muni_df_by_uf = None
 pts_by_uf = None
 bounds_by_uf = None
@@ -212,11 +220,13 @@ def load_uf_assets(uf: str):
     if not muni_dir:
         raise KeyError("Manifest sem chave de diretório dos municípios (muni_geojson_dir/municipalities_dir).")
 
-    muni_geo_path = BASE_DIR / muni_dir / f"{uf}.geojson"
+    muni_geo_relpath = f"{muni_dir}/{uf}.geojson"
+    muni_geo_path = BASE_DIR / muni_geo_relpath
     centroids_path = BASE_DIR / manifest["centroids_dir"] / f"{uf}_centroids.csv"
 
     muni_geo = read_json(muni_geo_path)
     muni_geojson_by_uf[uf] = muni_geo
+    muni_geojson_source_by_uf[uf] = asset_url_from_relpath(muni_geo_relpath) or muni_geo
     muni_df_by_uf[uf] = geojson_properties_df(muni_geo)
     pts_by_uf[uf] = pd.read_csv(centroids_path)
     bounds_by_uf[uf] = geojson_bounds(muni_geo)
@@ -236,9 +246,9 @@ def log_runtime_file_health():
 
 
 def ensure_data_loaded():
-    global df, manifest, states_geojson, states_df, state_centroids
+    global df, manifest, states_geojson, states_geojson_source, states_df, state_centroids
     global state_totals, city_agg_by_state, state_meta
-    global muni_geojson_by_uf, muni_df_by_uf, pts_by_uf, bounds_by_uf
+    global muni_geojson_by_uf, muni_geojson_source_by_uf, muni_df_by_uf, pts_by_uf, bounds_by_uf
     global brazil_fig_cached, state_fig_cache, init_error, did_log_file_health
 
     if not did_log_file_health:
@@ -259,6 +269,7 @@ def ensure_data_loaded():
         state_centroids_path = BASE_DIR / manifest["state_centroids_csv"]
 
         states_geojson = read_json(states_geo_path)
+        states_geojson_source = asset_url_from_relpath(manifest["states_geojson"]) or states_geojson
         states_df = geojson_properties_df(states_geojson)
         # garante coluna usada nos merges
         if "state_name_norm" not in states_df.columns:
@@ -290,6 +301,7 @@ def ensure_data_loaded():
         }
 
         muni_geojson_by_uf = {}
+        muni_geojson_source_by_uf = {}
         muni_df_by_uf = {}
         pts_by_uf = {}
         bounds_by_uf = {}
@@ -302,44 +314,65 @@ def ensure_data_loaded():
 
 
 def build_brazil_fig():
-    agg_state = df.groupby("estado_norm", as_index=False)[VALUE_COL].sum()
-    states_plot = (
-        state_centroids.copy()
-        .assign(state_name_norm=lambda d: d["name_state"].map(norm))
-        .merge(agg_state.rename(columns={"estado_norm": "state_name_norm"}), on="state_name_norm", how="left")
+    agg_state = (
+        df.groupby("estado_norm", as_index=False)[VALUE_COL]
+        .sum()
+        .rename(columns={"estado_norm": "state_name_norm"})
     )
+
+    states_plot = states_df.merge(agg_state, on="state_name_norm", how="left")
     states_plot[VALUE_COL] = states_plot[VALUE_COL].fillna(0).astype(float)
 
-    sizes = (states_plot[VALUE_COL].clip(lower=1) ** 0.5) * 1.9 + 7
-    hover_txt = (
-        states_plot["name_state"].astype(str)
-        + "<br>Total: "
-        + states_plot[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
+    fig = px.choropleth_mapbox(
+        states_plot,
+        geojson=states_geojson_source,
+        locations="abbrev_state",
+        featureidkey="properties.abbrev_state",
+        color=VALUE_COL,
+        custom_data=["state_name_norm"],
+        color_continuous_scale="Sunsetdark",
+        hover_name="name_state",
+        hover_data={VALUE_COL: ":,.0f"},
+        labels={VALUE_COL: "Quantidade"},
+        opacity=0.88,
+        mapbox_style=MAP_STYLE,
+        center={"lat": -14.2, "lon": -51.9},
+        zoom=3.4,
     )
 
-    fig = go.Figure()
+    fig.update_traces(
+        marker_line_width=0.8,
+        marker_line_color="#F8FAFC",
+        hovertemplate="<b>%{hovertext}</b><br>Quantidade: %{z:,.0f}<extra></extra>",
+    )
+
+    fig.update_layout(
+        mapbox=dict(pitch=42, bearing=-14),
+        coloraxis_colorbar=dict(title="Quantidade", thickness=12, len=0.78),
+    )
+
+    labels = (
+        state_centroids.merge(
+            states_plot[["abbrev_state", VALUE_COL]],
+            on="abbrev_state",
+            how="left",
+        )
+        .fillna({VALUE_COL: 0})
+        .copy()
+    )
+    labels["label"] = (
+        labels["abbrev_state"].astype(str)
+        + "<br>"
+        + labels[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
+    )
     fig.add_trace(
         go.Scattermapbox(
-            lat=states_plot["lat"],
-            lon=states_plot["lon"],
-            mode="markers+text",
-            customdata=np.stack([states_plot["state_name_norm"]], axis=-1),
-            text=states_plot["abbrev_state"],
-            textposition="top center",
+            lat=labels["lat"],
+            lon=labels["lon"],
+            mode="text",
+            text=labels["label"],
             textfont=dict(size=10, color="#0f172a"),
-            marker=dict(
-                size=sizes,
-                color=states_plot[VALUE_COL],
-                colorscale="Sunsetdark",
-                cmin=0,
-                cmax=max(float(states_plot[VALUE_COL].max()), 1.0),
-                opacity=0.85,
-                showscale=True,
-                colorbar=dict(title="Quantidade", thickness=12, len=0.78),
-            ),
-            hovertemplate="%{text}<br>%{customdata[0]}<br>%{hovertext}<extra></extra>",
-            hovertext=hover_txt,
-            name="Estados",
+            hoverinfo="skip",
             showlegend=False,
         )
     )
@@ -348,13 +381,6 @@ def build_brazil_fig():
 
     fig.update_layout(
         title="Brasil - Influencers por Estado (clique para detalhar)",
-        mapbox=dict(
-            style=MAP_STYLE,
-            center={"lat": -14.2, "lon": -51.9},
-            zoom=3.4,
-            pitch=18,
-            bearing=0,
-        ),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=8, r=8, t=56, b=8),
@@ -415,17 +441,33 @@ def build_state_fig_by_uf(uf: str):
     pts = pts.merge(agg_city, on="muni_name_norm", how="left")
     pts[VALUE_COL] = pts[VALUE_COL].fillna(0)
     pts = pts[pts[VALUE_COL] > 0].copy()
-    if len(pts) > MAX_STATE_POINTS:
-        pts = pts.nlargest(MAX_STATE_POINTS, VALUE_COL).copy()
 
+    muni_geo = muni_geojson_source_by_uf[uf]
+    muni_df = muni_df_by_uf[uf]
     min_lon, min_lat, max_lon, max_lat = bounds_by_uf[uf]
     center_lat = (min_lat + max_lat) / 2
     center_lon = (min_lon + max_lon) / 2
 
     fig = go.Figure()
 
+    fig.add_trace(
+        go.Choroplethmapbox(
+            geojson=muni_geo,
+            locations=muni_df["code_muni"],
+            featureidkey="properties.code_muni",
+            z=[1] * len(muni_df),
+            colorscale=[[0, "#EDEDED"], [1, "#EDEDED"]],
+            showscale=False,
+            marker_line_width=0.6,
+            marker_line_color="rgba(0,0,0,0.18)",
+            hoverinfo="skip",
+            name="Municípios",
+            showlegend=True,
+        )
+    )
+
     sizes = (pts[VALUE_COL].astype(float).clip(lower=1) ** 0.5) * 4.0
-    hover_txt = pts["name_muni"] + " | " + pts[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
+    hover_txt = pts["name_muni"] + "<br>Total: " + pts[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
 
     fig.add_trace(
         go.Scattermapbox(
