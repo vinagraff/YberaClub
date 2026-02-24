@@ -20,6 +20,7 @@ VALUE_COL = "qt_influencers"
 COL_ESTADO = "estado"
 COL_CIDADE = "cidade"
 MAP_STYLE = "carto-positron"
+MAX_STATE_POINTS = int(os.environ.get("MAX_STATE_POINTS", "220"))
 
 
 # -----------------------------
@@ -508,10 +509,12 @@ def build_state_fig_by_uf(uf: str):
     pts = pts.merge(agg_city, on="muni_name_norm", how="left")
     pts[VALUE_COL] = pts[VALUE_COL].fillna(0)
     pts = pts[pts[VALUE_COL] > 0].copy()
+    if len(pts) > MAX_STATE_POINTS:
+        pts = pts.nlargest(MAX_STATE_POINTS, VALUE_COL).copy()
 
     fig = go.Figure()
     sizes = (pts[VALUE_COL].astype(float).clip(lower=1) ** 0.5) * 4.0
-    hover_txt = pts["name_muni"] + "<br>Quantidade: " + pts[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
+    hover_txt = pts["name_muni"] + " | " + pts[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
     fig.add_trace(
         go.Scattergeo(
             lat=pts["lat"],
