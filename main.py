@@ -347,7 +347,6 @@ def build_brazil_fig():
             text=hover_name,
             hovertemplate="<b>%{text}</b><br>Quantidade: %{z:,.0f}<extra></extra>",
             showscale=True,
-            opacity=0.88,
         )
     )
 
