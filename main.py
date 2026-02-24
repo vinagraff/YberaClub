@@ -298,15 +298,91 @@ def build_brazil_fig():
         + "<br>Quantidade: "
         + states_plot[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
     )
+    text_totals = states_plot[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
+
+    vmin = float(states_plot[VALUE_COL].min())
+    vmax = float(states_plot[VALUE_COL].max())
+    if vmax > vmin:
+        norm_vals = (states_plot[VALUE_COL] - vmin) / (vmax - vmin)
+    else:
+        norm_vals = states_plot[VALUE_COL] * 0
+    mask_dark = norm_vals >= 0.55
 
     fig = go.Figure()
+    fig.add_trace(
+        go.Choropleth(
+            geojson=states_geojson,
+            locations=states_df["abbrev_state"],
+            featureidkey="properties.abbrev_state",
+            z=[0] * len(states_df),
+            colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
+            showscale=False,
+            marker_line_width=1.0,
+            marker_line_color="#334155",
+            hoverinfo="skip",
+        )
+    )
+    countries = pd.DataFrame(
+        [
+            {"name": "Brasil", "lat": -10.0, "lon": -53.0},
+            {"name": "Argentina", "lat": -33.0, "lon": -65.0},
+            {"name": "Chile", "lat": -26.0, "lon": -70.0},
+            {"name": "Bolívia", "lat": -16.5, "lon": -64.5},
+            {"name": "Paraguai", "lat": -23.5, "lon": -58.5},
+            {"name": "Uruguai", "lat": -32.7, "lon": -56.0},
+            {"name": "Peru", "lat": -10.0, "lon": -74.5},
+            {"name": "Colômbia", "lat": 2.0, "lon": -73.0},
+            {"name": "Venezuela", "lat": 7.0, "lon": -66.0},
+            {"name": "Estados Unidos", "lat": 39.0, "lon": -98.0},
+            {"name": "Canadá", "lat": 57.0, "lon": -106.0},
+            {"name": "México", "lat": 22.0, "lon": -102.0},
+            {"name": "Espanha", "lat": 40.2, "lon": -3.7},
+            {"name": "França", "lat": 46.4, "lon": 2.0},
+            {"name": "Alemanha", "lat": 51.0, "lon": 10.0},
+            {"name": "Reino Unido", "lat": 54.5, "lon": -2.5},
+            {"name": "Itália", "lat": 42.8, "lon": 12.8},
+            {"name": "Portugal", "lat": 39.7, "lon": -8.0},
+            {"name": "Marrocos", "lat": 31.8, "lon": -7.2},
+            {"name": "Argélia", "lat": 28.0, "lon": 1.7},
+            {"name": "Egito", "lat": 26.8, "lon": 30.8},
+            {"name": "Nigéria", "lat": 9.5, "lon": 8.0},
+            {"name": "África do Sul", "lat": -29.0, "lon": 24.0},
+            {"name": "Rússia", "lat": 60.0, "lon": 90.0},
+            {"name": "China", "lat": 35.0, "lon": 103.0},
+            {"name": "Índia", "lat": 22.5, "lon": 79.0},
+            {"name": "Japão", "lat": 36.2, "lon": 138.3},
+            {"name": "Austrália", "lat": -25.0, "lon": 134.0},
+        ]
+    )
+    fig.add_trace(
+        go.Scattergeo(
+            lat=countries["lat"],
+            lon=countries["lon"],
+            mode="text",
+            text=countries["name"],
+            textposition="middle center",
+            textfont=dict(size=11, color="rgba(100,116,139,0.30)"),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
     fig.add_trace(
         go.Scattergeo(
             lat=states_plot["lat"],
             lon=states_plot["lon"],
-            mode="markers+text",
-            text=states_plot["abbrev_state"],
-            textposition="top center",
+            mode="text",
+            text=states_plot["name_state"],
+            textposition="middle center",
+            textfont=dict(size=8, color="rgba(100,116,139,0.40)"),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scattergeo(
+            lat=states_plot["lat"],
+            lon=states_plot["lon"],
+            mode="markers",
             customdata=states_plot[["state_name_norm"]],
             hovertext=hover_txt,
             hovertemplate="%{hovertext}<extra></extra>",
@@ -324,13 +400,37 @@ def build_brazil_fig():
             showlegend=False,
         )
     )
+    fig.add_trace(
+        go.Scattergeo(
+            lat=states_plot.loc[mask_dark, "lat"],
+            lon=states_plot.loc[mask_dark, "lon"],
+            mode="text",
+            text=text_totals[mask_dark],
+            textposition="middle center",
+            textfont=dict(size=10, color="#F8FAFC"),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scattergeo(
+            lat=states_plot.loc[~mask_dark, "lat"],
+            lon=states_plot.loc[~mask_dark, "lon"],
+            mode="text",
+            text=text_totals[~mask_dark],
+            textposition="middle center",
+            textfont=dict(size=10, color="#0f172a"),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
 
     total_brasil = int(df[VALUE_COL].sum())
 
     fig.update_layout(
         title="Brasil - Influencers por Estado (clique para detalhar)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
         margin=dict(l=8, r=8, t=56, b=8),
         annotations=[
             dict(
@@ -342,8 +442,8 @@ def build_brazil_fig():
                 yanchor="bottom",
                 showarrow=False,
                 align="left",
-                bgcolor="rgba(255,255,255,0.92)",
-                bordercolor="#cbd5e1",
+                bgcolor="rgba(255,255,255,0.96)",
+                bordercolor="rgba(148,163,184,0.45)",
                 borderwidth=1,
                 borderpad=5,
                 font=dict(size=12, color="#0f172a"),
@@ -352,12 +452,23 @@ def build_brazil_fig():
         ],
     )
     fig.update_geos(
-        visible=False,
-        scope="south america",
-        center=dict(lat=-14.2, lon=-51.9),
-        projection_type="mercator",
-        lataxis_range=[-35, 6],
-        lonaxis_range=[-75, -30],
+        visible=True,
+        scope="world",
+        projection_type="orthographic",
+        projection_rotation=dict(lon=-50, lat=-12, roll=0),
+        projection_scale=2.1,
+        showcountries=True,
+        countrycolor="rgba(100,116,139,0.40)",
+        countrywidth=0.75,
+        showcoastlines=True,
+        coastlinecolor="rgba(100,116,139,0.35)",
+        coastlinewidth=0.6,
+        showland=True,
+        landcolor="#ffffff",
+        showocean=True,
+        oceancolor="#f8fafc",
+        bgcolor="#ffffff",
+        showframe=False,
     )
 
     return fig
