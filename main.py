@@ -465,6 +465,7 @@ def build_brazil_fig():
         title="Brasil - Influencers por Estado (clique para detalhar)",
         paper_bgcolor="#ffffff",
         plot_bgcolor="#ffffff",
+        dragmode="pan",
         margin=dict(l=8, r=8, t=56, b=8),
         annotations=[
             dict(
@@ -593,6 +594,7 @@ def build_state_fig_by_uf(uf: str):
             text=f"{state_name} — Cidades (total: {total_state:,})".replace(",", "."),
             x=0.5, xanchor="center"
         ),
+        dragmode="pan",
         margin=dict(l=10, r=10, t=60, b=10),
         paper_bgcolor="white",
         plot_bgcolor="white",
@@ -651,6 +653,7 @@ app = Dash(__name__)
 server = app.server
 
 app.layout = html.Div(
+    id="app-main",
     style={
         "maxWidth": "1240px",
         "margin": "0 auto",
@@ -687,10 +690,24 @@ app.layout = html.Div(
             children=[
                 dcc.Graph(
                     id="map",
-                    style={"height": "80vh", "borderRadius": "14px", "overflow": "hidden", "flex": "1 1 760px"},
-                    config={"displaylogo": False},
+                    style={
+                        "height": "80vh",
+                        "borderRadius": "14px",
+                        "overflow": "hidden",
+                        "flex": "1 1 760px",
+                        "touchAction": "none",
+                    },
+                    config={
+                        "displaylogo": False,
+                        "displayModeBar": True,
+                        "scrollZoom": True,
+                        "doubleClick": "reset",
+                        "responsive": True,
+                        "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                    },
                 ),
                 html.Div(
+                    id="rank-panel",
                     style={
                         "flex": "0 0 320px",
                         "minWidth": "280px",

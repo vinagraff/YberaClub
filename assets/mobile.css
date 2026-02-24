@@ -1,0 +1,15 @@
+@media (max-width: 900px) {
+  #app-main {
+    padding: 12px 8px 14px 8px !important;
+    border-radius: 12px !important;
+  }
+
+  #map {
+    height: 62vh !important;
+  }
+
+  #rank-panel {
+    min-width: 100% !important;
+    flex: 1 1 100% !important;
+  }
+}
