@@ -318,7 +318,7 @@ def build_brazil_fig():
             colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
             showscale=False,
             marker_line_width=1.0,
-            marker_line_color="#334155",
+            marker_line_color="rgba(100,116,139,0.40)",
             hoverinfo="skip",
         )
     )
