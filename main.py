@@ -2,11 +2,11 @@ import json
 import os
 import traceback
 from pathlib import Path
+import numpy as np
 
 import pandas as pd
 from unidecode import unidecode
 
-import plotly.express as px
 import plotly.graph_objects as go
 from dash import Dash, dcc, html, Input, Output, State, callback_context
 
@@ -315,46 +315,47 @@ def ensure_data_loaded():
 
 
 def build_brazil_fig():
-    agg_state = (
-        df.groupby("estado_norm", as_index=False)[VALUE_COL]
-        .sum()
-        .rename(columns={"estado_norm": "state_name_norm"})
+    agg_state = df.groupby("estado_norm", as_index=False)[VALUE_COL].sum()
+    state_totals_df = (
+        states_df[["abbrev_state", "name_state", "state_name_norm"]]
+        .drop_duplicates()
+        .merge(
+            agg_state.rename(columns={"estado_norm": "state_name_norm"}),
+            on="state_name_norm",
+            how="left",
+        )
+    )
+    state_totals_df[VALUE_COL] = state_totals_df[VALUE_COL].fillna(0).astype(float)
+    state_totals_map = dict(zip(state_totals_df["abbrev_state"], state_totals_df[VALUE_COL]))
+    locations = states_df["abbrev_state"].astype(str)
+    z_values = locations.map(lambda uf: float(state_totals_map.get(uf, 0)))
+    custom_state = states_df["state_name_norm"].astype(str)
+    hover_name = states_df["name_state"].astype(str)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Choroplethmapbox(
+            geojson=states_geojson_source,
+            locations=locations,
+            z=z_values,
+            featureidkey="properties.abbrev_state",
+            customdata=np.stack([custom_state], axis=-1),
+            colorscale="Sunsetdark",
+            marker_line_width=0.8,
+            marker_line_color="#F8FAFC",
+            colorbar=dict(title="Quantidade", thickness=12, len=0.78),
+            text=hover_name,
+            hovertemplate="<b>%{text}</b><br>Quantidade: %{z:,.0f}<extra></extra>",
+            showscale=True,
+            opacity=0.88,
+        )
     )
 
-    states_plot = states_df.merge(agg_state, on="state_name_norm", how="left")
-    states_plot[VALUE_COL] = states_plot[VALUE_COL].fillna(0).astype(float)
-
-    fig = px.choropleth_mapbox(
-        states_plot,
-        geojson=states_geojson_source,
-        locations="abbrev_state",
-        featureidkey="properties.abbrev_state",
-        color=VALUE_COL,
-        custom_data=["state_name_norm"],
-        color_continuous_scale="Sunsetdark",
-        hover_name="name_state",
-        hover_data={VALUE_COL: ":,.0f"},
-        labels={VALUE_COL: "Quantidade"},
-        opacity=0.88,
-        mapbox_style=MAP_STYLE,
-        center={"lat": -14.2, "lon": -51.9},
-        zoom=3.4,
-    )
-
-    fig.update_traces(
-        marker_line_width=0.8,
-        marker_line_color="#F8FAFC",
-        hovertemplate="<b>%{hovertext}</b><br>Quantidade: %{z:,.0f}<extra></extra>",
-    )
-
-    fig.update_layout(
-        mapbox=dict(pitch=42, bearing=-14),
-        coloraxis_colorbar=dict(title="Quantidade", thickness=12, len=0.78),
-    )
+    fig.update_layout(mapbox=dict(style=MAP_STYLE, center={"lat": -14.2, "lon": -51.9}, zoom=3.4, pitch=42, bearing=-14))
 
     labels = (
         state_centroids.merge(
-            states_plot[["abbrev_state", VALUE_COL]],
+            state_totals_df[["abbrev_state", VALUE_COL]],
             on="abbrev_state",
             how="left",
         )
