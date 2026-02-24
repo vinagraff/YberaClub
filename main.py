@@ -269,7 +269,8 @@ def ensure_data_loaded():
         state_centroids_path = BASE_DIR / manifest["state_centroids_csv"]
 
         states_geojson = read_json(states_geo_path)
-        states_geojson_source = asset_url_from_relpath(manifest["states_geojson"]) or states_geojson
+        # Para o mapa Brasil, usar objeto local é mais confiável no Plotly do que URL.
+        states_geojson_source = states_geojson
         states_df = geojson_properties_df(states_geojson)
         # garante coluna usada nos merges
         if "state_name_norm" not in states_df.columns:
