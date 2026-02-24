@@ -1,7 +1,6 @@
 import json
 import os
 from pathlib import Path
-import numpy as np
 
 import pandas as pd
 from unidecode import unidecode
@@ -291,7 +290,7 @@ def build_brazil_fig():
     states_plot = states_df.merge(agg_state, on="state_name_norm", how="left")
     states_plot[VALUE_COL] = states_plot[VALUE_COL].fillna(0).astype(float)
 
-    fig = px.choropleth_mapbox(
+    fig = px.choropleth(
         states_plot,
         geojson=states_geojson,
         locations="abbrev_state",
@@ -302,10 +301,6 @@ def build_brazil_fig():
         hover_name="name_state",
         hover_data={VALUE_COL: ":,.0f"},
         labels={VALUE_COL: "Quantidade"},
-        opacity=0.88,
-        mapbox_style=MAP_STYLE,
-        center={"lat": -14.2, "lon": -51.9},
-        zoom=3.4,
     )
 
     fig.update_traces(
@@ -314,10 +309,8 @@ def build_brazil_fig():
         hovertemplate="<b>%{hovertext}</b><br>Quantidade: %{z:,.0f}<extra></extra>",
     )
 
-    fig.update_layout(
-        mapbox=dict(pitch=42, bearing=-14),
-        coloraxis_colorbar=dict(title="Quantidade", thickness=12, len=0.78),
-    )
+    fig.update_layout(coloraxis_colorbar=dict(title="Quantidade", thickness=12, len=0.78))
+    fig.update_geos(visible=False, fitbounds="locations", projection_type="mercator")
 
     # Rótulos de total por estado no próprio mapa.
     labels = (
@@ -336,7 +329,7 @@ def build_brazil_fig():
     )
 
     fig.add_trace(
-        go.Scattermapbox(
+        go.Scattergeo(
             lat=labels["lat"],
             lon=labels["lon"],
             mode="text",
@@ -414,51 +407,26 @@ def build_state_fig_by_uf(uf: str):
 
     muni_geo = muni_geojson_by_uf[uf]
     muni_df = muni_df_by_uf[uf]
-    min_lon, min_lat, max_lon, max_lat = bounds_by_uf[uf]
-    center_lat = (min_lat + max_lat) / 2
-    center_lon = (min_lon + max_lon) / 2
+    muni_state = muni_df.copy()
+    muni_state["muni_name_norm"] = muni_state["name_muni"].map(norm)
+    muni_state = muni_state.merge(agg_city, on="muni_name_norm", how="left")
+    muni_state[VALUE_COL] = muni_state[VALUE_COL].fillna(0).astype(float)
 
     fig = go.Figure()
 
-    # base municípios (cinza claro)
     fig.add_trace(
-        go.Choroplethmapbox(
+        go.Choropleth(
             geojson=muni_geo,
-            locations=muni_df["geo_id"],
-            featureidkey="properties.geo_id",
-            z=[1] * len(muni_df),
-            colorscale=[[0, "#EDEDED"], [1, "#EDEDED"]],
-            showscale=False,
-            marker_line_width=0.6,
+            locations=muni_state["code_muni"],
+            featureidkey="properties.code_muni",
+            z=muni_state[VALUE_COL],
+            colorscale="Tealgrn",
+            showscale=True,
+            marker_line_width=0.4,
             marker_line_color="rgba(0,0,0,0.18)",
-            hoverinfo="skip",
-            name="Municípios",
-            showlegend=True,
-        )
-    )
-
-    sizes = (pts[VALUE_COL].astype(float).clip(lower=1) ** 0.5) * 4.0
-    hover_txt = pts["name_muni"] + "<br>Total: " + pts[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
-
-    fig.add_trace(
-        go.Scattermapbox(
-            lat=pts["lat"],
-            lon=pts["lon"],
-            mode="markers",
-            marker=dict(
-                size=sizes,
-                color=pts[VALUE_COL],
-                colorscale="Tealgrn",
-                cmin=0,
-                cmax=max(float(pts[VALUE_COL].max()), 1.0),
-                opacity=0.78,
-                showscale=True,
-                colorbar=dict(title="Quantidade", thickness=12, len=0.75),
-            ),
-            text=hover_txt,
-            hovertemplate="%{text}<extra></extra>",
-            name="Total por cidade",
-            showlegend=True,
+            colorbar=dict(title="Quantidade", thickness=12, len=0.75),
+            customdata=muni_state[["name_muni"]],
+            hovertemplate="<b>%{customdata[0]}</b><br>Quantidade: %{z:,.0f}<extra></extra>",
         )
     )
 
@@ -467,14 +435,13 @@ def build_state_fig_by_uf(uf: str):
         lambda x: f"{x:,}".replace(",", ".")
     )
     fig.add_trace(
-        go.Scattermapbox(
+        go.Scattergeo(
             lat=top_labels["lat"],
             lon=top_labels["lon"],
             mode="text",
             text=top_labels["label"],
             textfont=dict(size=10, color="#0f172a"),
             hoverinfo="skip",
-            name="Totais (top 12)",
             showlegend=False,
         )
     )
@@ -489,23 +456,6 @@ def build_state_fig_by_uf(uf: str):
         margin=dict(l=10, r=10, t=60, b=10),
         paper_bgcolor="white",
         plot_bgcolor="white",
-        mapbox=dict(
-            style="carto-positron",
-            center=dict(lat=center_lat, lon=center_lon),
-            zoom=5.3,
-            pitch=35,
-            bearing=0,
-        ),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=0.01,
-            xanchor="left",
-            x=0.01,
-            bgcolor="rgba(255,255,255,0.86)",
-            bordercolor="#cbd5e1",
-            borderwidth=1,
-        ),
         annotations=[
             dict(
                 x=0.01,
@@ -524,8 +474,9 @@ def build_state_fig_by_uf(uf: str):
                 text=f"Total do estado: {total_state:,}".replace(",", "."),
             )
         ],
-        showlegend=True,
+        showlegend=False,
     )
+    fig.update_geos(visible=False, fitbounds="locations", projection_type="mercator")
 
     return fig
 
