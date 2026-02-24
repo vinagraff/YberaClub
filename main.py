@@ -1,5 +1,6 @@
 import json
 import os
+import traceback
 from pathlib import Path
 import numpy as np
 
@@ -685,60 +686,72 @@ app.layout = html.Div(
     State("store-view", "data"),
 )
 def update_map(clickData, n_back, view):
-    ensure_data_loaded()
+    try:
+        ensure_data_loaded()
 
-    if init_error:
-        msg = f"Erro ao carregar dados geográficos: {init_error}"
-        return (
-            error_figure(msg),
-            {"level": "br", "estado_norm": None},
-            "Erro de inicialização",
-            [html.Li("Erro ao carregar dados")],
-            [html.Li("Erro ao carregar dados")],
-            "Top 10 Cidades",
-        )
+        if init_error:
+            msg = f"Erro ao carregar dados geográficos: {init_error}"
+            return (
+                error_figure(msg),
+                {"level": "br", "estado_norm": None},
+                "Erro de inicialização",
+                [html.Li("Erro ao carregar dados")],
+                [html.Li("Erro ao carregar dados")],
+                "Top 10 Cidades",
+            )
 
-    ctx = callback_context
-    triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
+        ctx = callback_context
+        triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
-    if triggered == "btn-back":
+        if triggered == "btn-back":
+            new_view = {"level": "br", "estado_norm": None}
+            rs, rc, ctitle = build_rankings(new_view)
+            return get_brazil_fig(), new_view, "Visão Brasil", rs, rc, ctitle
+
+        if view["level"] == "br" and clickData:
+            try:
+                point = clickData["points"][0]
+                estado_norm = None
+
+                if point.get("customdata"):
+                    raw = point["customdata"]
+                    if isinstance(raw, (list, tuple)):
+                        estado_norm = raw[0]
+                    else:
+                        estado_norm = raw
+                elif point.get("location") is not None:
+                    location = str(point["location"])
+                    match = states_df[states_df["geo_id"] == location]
+                    if not match.empty:
+                        estado_norm = match.iloc[0]["state_name_norm"]
+
+                if estado_norm:
+                    fig = get_state_fig(estado_norm)
+                    new_view = {"level": "state", "estado_norm": estado_norm}
+                    rs, rc, ctitle = build_rankings(new_view)
+                    return fig, new_view, "Visão Estado (clique em Voltar para Brasil)", rs, rc, ctitle
+            except Exception:
+                pass
+
+        if view["level"] == "state" and view["estado_norm"]:
+            fig = get_state_fig(view["estado_norm"])
+            rs, rc, ctitle = build_rankings(view)
+            return fig, view, "Visão Estado (clique em Voltar para Brasil)", rs, rc, ctitle
+
         new_view = {"level": "br", "estado_norm": None}
         rs, rc, ctitle = build_rankings(new_view)
         return get_brazil_fig(), new_view, "Visão Brasil", rs, rc, ctitle
-
-    if view["level"] == "br" and clickData:
-        try:
-            point = clickData["points"][0]
-            estado_norm = None
-
-            if point.get("customdata"):
-                raw = point["customdata"]
-                if isinstance(raw, (list, tuple)):
-                    estado_norm = raw[0]
-                else:
-                    estado_norm = raw
-            elif point.get("location") is not None:
-                location = str(point["location"])
-                match = states_df[states_df["geo_id"] == location]
-                if not match.empty:
-                    estado_norm = match.iloc[0]["state_name_norm"]
-
-            if estado_norm:
-                fig = get_state_fig(estado_norm)
-                new_view = {"level": "state", "estado_norm": estado_norm}
-                rs, rc, ctitle = build_rankings(new_view)
-                return fig, new_view, "Visão Estado (clique em Voltar para Brasil)", rs, rc, ctitle
-        except Exception:
-            pass
-
-    if view["level"] == "state" and view["estado_norm"]:
-        fig = get_state_fig(view["estado_norm"])
-        rs, rc, ctitle = build_rankings(view)
-        return fig, view, "Visão Estado (clique em Voltar para Brasil)", rs, rc, ctitle
-
-    new_view = {"level": "br", "estado_norm": None}
-    rs, rc, ctitle = build_rankings(new_view)
-    return get_brazil_fig(), new_view, "Visão Brasil", rs, rc, ctitle
+    except Exception as exc:
+        print("[CALLBACK_ERROR] update_map failed:", repr(exc))
+        print(traceback.format_exc())
+        return (
+            error_figure(f"Erro no callback: {exc}"),
+            {"level": "br", "estado_norm": None},
+            "Erro no callback",
+            [html.Li("Falha ao montar ranking de estados")],
+            [html.Li("Falha ao montar ranking de cidades")],
+            "Top 10 Cidades",
+        )
 
 
 if __name__ == "__main__":
