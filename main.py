@@ -431,30 +431,11 @@ def build_state_fig_by_uf(uf: str):
     pts[VALUE_COL] = pts[VALUE_COL].fillna(0)
     pts = pts[pts[VALUE_COL] > 0].copy()
 
-    muni_geo = muni_geojson_by_uf[uf]
-    muni_df = muni_df_by_uf[uf]
     min_lon, min_lat, max_lon, max_lat = bounds_by_uf[uf]
     center_lat = (min_lat + max_lat) / 2
     center_lon = (min_lon + max_lon) / 2
 
     fig = go.Figure()
-
-    # base municípios (cinza claro)
-    fig.add_trace(
-        go.Choroplethmapbox(
-            geojson=muni_geo,
-            locations=muni_df["geo_id"],
-            featureidkey="properties.geo_id",
-            z=[1] * len(muni_df),
-            colorscale=[[0, "#EDEDED"], [1, "#EDEDED"]],
-            showscale=False,
-            marker_line_width=0.6,
-            marker_line_color="rgba(0,0,0,0.18)",
-            hoverinfo="skip",
-            name="Municípios",
-            showlegend=True,
-        )
-    )
 
     sizes = (pts[VALUE_COL].astype(float).clip(lower=1) ** 0.5) * 4.0
     hover_txt = pts["name_muni"] + "<br>Total: " + pts[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
