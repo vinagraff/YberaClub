@@ -5,7 +5,6 @@ from pathlib import Path
 import pandas as pd
 from unidecode import unidecode
 
-import plotly.express as px
 import plotly.graph_objects as go
 from dash import Dash, dcc, html, Input, Output, State, callback_context
 
@@ -287,55 +286,41 @@ def build_brazil_fig():
         .rename(columns={"estado_norm": "state_name_norm"})
     )
 
-    states_plot = states_df.merge(agg_state, on="state_name_norm", how="left")
+    states_plot = (
+        state_centroids.copy()
+        .assign(state_name_norm=lambda d: d["name_state"].map(norm))
+        .merge(agg_state, on="state_name_norm", how="left")
+    )
     states_plot[VALUE_COL] = states_plot[VALUE_COL].fillna(0).astype(float)
-
-    fig = px.choropleth(
-        states_plot,
-        geojson=states_geojson,
-        locations="abbrev_state",
-        featureidkey="properties.abbrev_state",
-        color=VALUE_COL,
-        custom_data=["state_name_norm"],
-        color_continuous_scale="Sunsetdark",
-        hover_name="name_state",
-        hover_data={VALUE_COL: ":,.0f"},
-        labels={VALUE_COL: "Quantidade"},
+    sizes = (states_plot[VALUE_COL].clip(lower=1) ** 0.5) * 1.7 + 8
+    hover_txt = (
+        states_plot["name_state"].astype(str)
+        + "<br>Quantidade: "
+        + states_plot[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
     )
 
-    fig.update_traces(
-        marker_line_width=0.8,
-        marker_line_color="#F8FAFC",
-        hovertemplate="<b>%{hovertext}</b><br>Quantidade: %{z:,.0f}<extra></extra>",
-    )
-
-    fig.update_layout(coloraxis_colorbar=dict(title="Quantidade", thickness=12, len=0.78))
-    fig.update_geos(visible=False, fitbounds="locations", projection_type="mercator")
-
-    # Rótulos de total por estado no próprio mapa.
-    labels = (
-        state_centroids.merge(
-            states_plot[["abbrev_state", VALUE_COL]],
-            on="abbrev_state",
-            how="left",
-        )
-        .fillna({VALUE_COL: 0})
-        .copy()
-    )
-    labels["label"] = (
-        labels["abbrev_state"].astype(str)
-        + "<br>"
-        + labels[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
-    )
-
+    fig = go.Figure()
     fig.add_trace(
         go.Scattergeo(
-            lat=labels["lat"],
-            lon=labels["lon"],
-            mode="text",
-            text=labels["label"],
-            textfont=dict(size=10, color="#0f172a"),
-            hoverinfo="skip",
+            lat=states_plot["lat"],
+            lon=states_plot["lon"],
+            mode="markers+text",
+            text=states_plot["abbrev_state"],
+            textposition="top center",
+            customdata=states_plot[["state_name_norm"]],
+            hovertext=hover_txt,
+            hovertemplate="%{hovertext}<extra></extra>",
+            marker=dict(
+                size=sizes,
+                color=states_plot[VALUE_COL],
+                colorscale="Sunsetdark",
+                cmin=0,
+                cmax=max(float(states_plot[VALUE_COL].max()), 1.0),
+                showscale=True,
+                colorbar=dict(title="Quantidade", thickness=12, len=0.78),
+                opacity=0.86,
+                line=dict(width=0.6, color="#f8fafc"),
+            ),
             showlegend=False,
         )
     )
@@ -365,6 +350,14 @@ def build_brazil_fig():
                 text=f"Total Brasil: {total_brasil:,}".replace(",", "."),
             )
         ],
+    )
+    fig.update_geos(
+        visible=False,
+        scope="south america",
+        center=dict(lat=-14.2, lon=-51.9),
+        projection_type="mercator",
+        lataxis_range=[-35, 6],
+        lonaxis_range=[-75, -30],
     )
 
     return fig
@@ -405,28 +398,28 @@ def build_state_fig_by_uf(uf: str):
     pts[VALUE_COL] = pts[VALUE_COL].fillna(0)
     pts = pts[pts[VALUE_COL] > 0].copy()
 
-    muni_geo = muni_geojson_by_uf[uf]
-    muni_df = muni_df_by_uf[uf]
-    muni_state = muni_df.copy()
-    muni_state["muni_name_norm"] = muni_state["name_muni"].map(norm)
-    muni_state = muni_state.merge(agg_city, on="muni_name_norm", how="left")
-    muni_state[VALUE_COL] = muni_state[VALUE_COL].fillna(0).astype(float)
-
     fig = go.Figure()
-
+    sizes = (pts[VALUE_COL].astype(float).clip(lower=1) ** 0.5) * 4.0
+    hover_txt = pts["name_muni"] + "<br>Quantidade: " + pts[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
     fig.add_trace(
-        go.Choropleth(
-            geojson=muni_geo,
-            locations=muni_state["code_muni"],
-            featureidkey="properties.code_muni",
-            z=muni_state[VALUE_COL],
-            colorscale="Tealgrn",
-            showscale=True,
-            marker_line_width=0.4,
-            marker_line_color="rgba(0,0,0,0.18)",
-            colorbar=dict(title="Quantidade", thickness=12, len=0.75),
-            customdata=muni_state[["name_muni"]],
-            hovertemplate="<b>%{customdata[0]}</b><br>Quantidade: %{z:,.0f}<extra></extra>",
+        go.Scattergeo(
+            lat=pts["lat"],
+            lon=pts["lon"],
+            mode="markers",
+            hovertext=hover_txt,
+            hovertemplate="%{hovertext}<extra></extra>",
+            marker=dict(
+                size=sizes,
+                color=pts[VALUE_COL],
+                colorscale="Tealgrn",
+                cmin=0,
+                cmax=max(float(pts[VALUE_COL].max()), 1.0),
+                opacity=0.82,
+                showscale=True,
+                colorbar=dict(title="Quantidade", thickness=12, len=0.75),
+                line=dict(width=0.4, color="#ecfeff"),
+            ),
+            showlegend=False,
         )
     )
 
