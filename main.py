@@ -9,6 +9,7 @@ from unidecode import unidecode
 import plotly.express as px
 import plotly.graph_objects as go
 from dash import Dash, dcc, html, Input, Output, State, callback_context
+from dash.exceptions import PreventUpdate
 
 
 # -----------------------------
@@ -736,6 +737,8 @@ def update_map(clickData, n_back, view):
             )
 
         ctx = callback_context
+        if not ctx.triggered:
+            raise PreventUpdate
         triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
         if triggered == "btn-back":
