@@ -199,6 +199,7 @@ bounds_by_uf = None
 brazil_fig_cached = None
 state_fig_cache = None
 init_error = None
+did_log_file_health = False
 
 
 def load_uf_assets(uf: str):
@@ -219,11 +220,28 @@ def load_uf_assets(uf: str):
     bounds_by_uf[uf] = geojson_bounds(muni_geo)
 
 
+def log_runtime_file_health():
+    paths = [
+        BASE_DIR / "AfiliadosAtivos_EstadoCidade.xlsx",
+        BASE_DIR / "geo_assets",
+        BASE_DIR / "geo_assets" / "manifest.json",
+        BASE_DIR / "geo_assets" / "states.geojson",
+        BASE_DIR / "geo_assets" / "state_centroids.csv",
+    ]
+    print(f"[HEALTH] BASE_DIR={BASE_DIR}")
+    for path in paths:
+        print(f"[HEALTH] {path} exists={path.exists()}")
+
+
 def ensure_data_loaded():
     global df, manifest, states_geojson, states_df, state_centroids
     global state_totals, city_agg_by_state, state_meta
     global muni_geojson_by_uf, muni_df_by_uf, pts_by_uf, bounds_by_uf
-    global brazil_fig_cached, state_fig_cache, init_error
+    global brazil_fig_cached, state_fig_cache, init_error, did_log_file_health
+
+    if not did_log_file_health:
+        log_runtime_file_health()
+        did_log_file_health = True
 
     if df is not None or init_error is not None:
         return
