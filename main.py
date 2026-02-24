@@ -1,7 +1,7 @@
 import json
 import os
-import traceback
 from pathlib import Path
+import numpy as np
 
 import pandas as pd
 from unidecode import unidecode
@@ -22,7 +22,6 @@ VALUE_COL = "qt_influencers"
 COL_ESTADO = "estado"
 COL_CIDADE = "cidade"
 MAP_STYLE = "carto-positron"
-GEO_ASSETS_BASE_URL = os.environ.get("GEO_ASSETS_BASE_URL", "").strip().rstrip("/")
 
 
 # -----------------------------
@@ -51,13 +50,6 @@ def load_data():
 
 def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def asset_url_from_relpath(rel_path: str):
-    if not GEO_ASSETS_BASE_URL:
-        return None
-    rel = str(rel_path).replace("\\", "/").lstrip("./")
-    return f"{GEO_ASSETS_BASE_URL}/{rel}"
 
 
 def geojson_properties_df(geojson: dict):
@@ -192,7 +184,6 @@ def build_rankings(view: dict):
 df = None
 manifest = None
 states_geojson = None
-states_geojson_source = None
 states_df = None
 state_centroids = None
 
@@ -201,7 +192,6 @@ city_agg_by_state = None
 state_meta = None
 
 muni_geojson_by_uf = None
-muni_geojson_source_by_uf = None
 muni_df_by_uf = None
 pts_by_uf = None
 bounds_by_uf = None
@@ -209,7 +199,6 @@ bounds_by_uf = None
 brazil_fig_cached = None
 state_fig_cache = None
 init_error = None
-did_log_file_health = False
 
 
 def load_uf_assets(uf: str):
@@ -220,40 +209,21 @@ def load_uf_assets(uf: str):
     if not muni_dir:
         raise KeyError("Manifest sem chave de diretório dos municípios (muni_geojson_dir/municipalities_dir).")
 
-    muni_geo_relpath = f"{muni_dir}/{uf}.geojson"
-    muni_geo_path = BASE_DIR / muni_geo_relpath
+    muni_geo_path = BASE_DIR / muni_dir / f"{uf}.geojson"
     centroids_path = BASE_DIR / manifest["centroids_dir"] / f"{uf}_centroids.csv"
 
     muni_geo = read_json(muni_geo_path)
     muni_geojson_by_uf[uf] = muni_geo
-    muni_geojson_source_by_uf[uf] = asset_url_from_relpath(muni_geo_relpath) or muni_geo
     muni_df_by_uf[uf] = geojson_properties_df(muni_geo)
     pts_by_uf[uf] = pd.read_csv(centroids_path)
     bounds_by_uf[uf] = geojson_bounds(muni_geo)
 
 
-def log_runtime_file_health():
-    paths = [
-        BASE_DIR / "AfiliadosAtivos_EstadoCidade.xlsx",
-        BASE_DIR / "geo_assets",
-        BASE_DIR / "geo_assets" / "manifest.json",
-        BASE_DIR / "geo_assets" / "states.geojson",
-        BASE_DIR / "geo_assets" / "state_centroids.csv",
-    ]
-    print(f"[HEALTH] BASE_DIR={BASE_DIR}")
-    for path in paths:
-        print(f"[HEALTH] {path} exists={path.exists()}")
-
-
 def ensure_data_loaded():
-    global df, manifest, states_geojson, states_geojson_source, states_df, state_centroids
+    global df, manifest, states_geojson, states_df, state_centroids
     global state_totals, city_agg_by_state, state_meta
-    global muni_geojson_by_uf, muni_geojson_source_by_uf, muni_df_by_uf, pts_by_uf, bounds_by_uf
-    global brazil_fig_cached, state_fig_cache, init_error, did_log_file_health
-
-    if not did_log_file_health:
-        log_runtime_file_health()
-        did_log_file_health = True
+    global muni_geojson_by_uf, muni_df_by_uf, pts_by_uf, bounds_by_uf
+    global brazil_fig_cached, state_fig_cache, init_error
 
     if df is not None or init_error is not None:
         return
@@ -269,7 +239,6 @@ def ensure_data_loaded():
         state_centroids_path = BASE_DIR / manifest["state_centroids_csv"]
 
         states_geojson = read_json(states_geo_path)
-        states_geojson_source = asset_url_from_relpath(manifest["states_geojson"]) or states_geojson
         states_df = geojson_properties_df(states_geojson)
         # garante coluna usada nos merges
         if "state_name_norm" not in states_df.columns:
@@ -301,7 +270,6 @@ def ensure_data_loaded():
         }
 
         muni_geojson_by_uf = {}
-        muni_geojson_source_by_uf = {}
         muni_df_by_uf = {}
         pts_by_uf = {}
         bounds_by_uf = {}
@@ -325,7 +293,7 @@ def build_brazil_fig():
 
     fig = px.choropleth_mapbox(
         states_plot,
-        geojson=states_geojson_source,
+        geojson=states_geojson,
         locations="abbrev_state",
         featureidkey="properties.abbrev_state",
         color=VALUE_COL,
@@ -334,6 +302,7 @@ def build_brazil_fig():
         hover_name="name_state",
         hover_data={VALUE_COL: ":,.0f"},
         labels={VALUE_COL: "Quantidade"},
+        opacity=0.88,
         mapbox_style=MAP_STYLE,
         center={"lat": -14.2, "lon": -51.9},
         zoom=3.4,
@@ -350,6 +319,7 @@ def build_brazil_fig():
         coloraxis_colorbar=dict(title="Quantidade", thickness=12, len=0.78),
     )
 
+    # Rótulos de total por estado no próprio mapa.
     labels = (
         state_centroids.merge(
             states_plot[["abbrev_state", VALUE_COL]],
@@ -364,6 +334,7 @@ def build_brazil_fig():
         + "<br>"
         + labels[VALUE_COL].round(0).astype(int).map(lambda x: f"{x:,}".replace(",", "."))
     )
+
     fig.add_trace(
         go.Scattermapbox(
             lat=labels["lat"],
@@ -441,7 +412,7 @@ def build_state_fig_by_uf(uf: str):
     pts[VALUE_COL] = pts[VALUE_COL].fillna(0)
     pts = pts[pts[VALUE_COL] > 0].copy()
 
-    muni_geo = muni_geojson_source_by_uf[uf]
+    muni_geo = muni_geojson_by_uf[uf]
     muni_df = muni_df_by_uf[uf]
     min_lon, min_lat, max_lon, max_lat = bounds_by_uf[uf]
     center_lat = (min_lat + max_lat) / 2
@@ -449,11 +420,12 @@ def build_state_fig_by_uf(uf: str):
 
     fig = go.Figure()
 
+    # base municípios (cinza claro)
     fig.add_trace(
         go.Choroplethmapbox(
             geojson=muni_geo,
-            locations=muni_df["code_muni"],
-            featureidkey="properties.code_muni",
+            locations=muni_df["geo_id"],
+            featureidkey="properties.geo_id",
             z=[1] * len(muni_df),
             colorscale=[[0, "#EDEDED"], [1, "#EDEDED"]],
             showscale=False,
@@ -615,7 +587,7 @@ app.layout = html.Div(
                         "cursor": "pointer",
                     },
                 ),
-                html.Div(id="subtitle", children="Carregando...", style={"color": "#334155", "fontWeight": "600"}),
+                html.Div(id="subtitle", style={"color": "#334155", "fontWeight": "600"}),
             ],
         ),
         dcc.Store(id="store-view", data={"level": "br", "estado_norm": None}),
@@ -626,7 +598,6 @@ app.layout = html.Div(
                     id="map",
                     style={"height": "80vh", "borderRadius": "14px", "overflow": "hidden", "flex": "1 1 760px"},
                     config={"displaylogo": False},
-                    figure=error_figure("Carregando mapa..."),
                 ),
                 html.Div(
                     style={
@@ -653,7 +624,7 @@ app.layout = html.Div(
                                     style={"fontSize": "12px", "fontWeight": "700", "letterSpacing": "0.4px", "color": "#64748b", "textTransform": "uppercase"},
                                 ),
                                 html.H4("Top 10 Estados", style={"margin": "6px 0 10px 0", "color": "#0f172a"}),
-                                html.Ol(id="rank-states", style={"margin": "0 0 0 18px", "padding": 0}, children=[html.Li("Carregando...")]),
+                                html.Ol(id="rank-states", style={"margin": "0 0 0 18px", "padding": 0}),
                             ],
                         ),
                         html.Div(
@@ -670,10 +641,10 @@ app.layout = html.Div(
                                 ),
                                 html.H4(
                                     id="rank-cities-title",
-                                    children="Top 10 Cidades",
+                                    children="Top 10 Cidades (Brasil)",
                                     style={"margin": "6px 0 10px 0", "color": "#0f172a"},
                                 ),
-                                html.Ol(id="rank-cities", style={"margin": "0 0 0 18px", "padding": 0}, children=[html.Li("Carregando...")]),
+                                html.Ol(id="rank-cities", style={"margin": "0 0 0 18px", "padding": 0}),
                             ],
                         ),
                     ],
@@ -694,75 +665,62 @@ app.layout = html.Div(
     Input("map", "clickData"),
     Input("btn-back", "n_clicks"),
     State("store-view", "data"),
-    prevent_initial_call=False,
 )
 def update_map(clickData, n_back, view):
-    try:
-        ensure_data_loaded()
+    ensure_data_loaded()
 
-        if init_error:
-            msg = f"Erro ao carregar dados geográficos: {init_error}"
-            return (
-                error_figure(msg),
-                {"level": "br", "estado_norm": None},
-                "Erro de inicialização",
-                [html.Li("Erro ao carregar dados")],
-                [html.Li("Erro ao carregar dados")],
-                "Top 10 Cidades",
-            )
+    if init_error:
+        msg = f"Erro ao carregar dados geográficos: {init_error}"
+        return (
+            error_figure(msg),
+            {"level": "br", "estado_norm": None},
+            "Erro de inicialização",
+            [html.Li("Erro ao carregar dados")],
+            [html.Li("Erro ao carregar dados")],
+            "Top 10 Cidades",
+        )
 
-        ctx = callback_context
-        triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
+    ctx = callback_context
+    triggered = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
-        if triggered == "btn-back":
-            new_view = {"level": "br", "estado_norm": None}
-            rs, rc, ctitle = build_rankings(new_view)
-            return get_brazil_fig(), new_view, "Visão Brasil", rs, rc, ctitle
-
-        if view["level"] == "br" and clickData:
-            try:
-                point = clickData["points"][0]
-                estado_norm = None
-
-                if point.get("customdata"):
-                    raw = point["customdata"]
-                    if isinstance(raw, (list, tuple)):
-                        estado_norm = raw[0]
-                    else:
-                        estado_norm = raw
-                elif point.get("location") is not None:
-                    location = str(point["location"])
-                    match = states_df[states_df["geo_id"] == location]
-                    if not match.empty:
-                        estado_norm = match.iloc[0]["state_name_norm"]
-
-                if estado_norm:
-                    fig = get_state_fig(estado_norm)
-                    new_view = {"level": "state", "estado_norm": estado_norm}
-                    rs, rc, ctitle = build_rankings(new_view)
-                    return fig, new_view, "Visão Estado (clique em Voltar para Brasil)", rs, rc, ctitle
-            except Exception:
-                pass
-
-        if view["level"] == "state" and view["estado_norm"]:
-            fig = get_state_fig(view["estado_norm"])
-            rs, rc, ctitle = build_rankings(view)
-            return fig, view, "Visão Estado (clique em Voltar para Brasil)", rs, rc, ctitle
-
+    if triggered == "btn-back":
         new_view = {"level": "br", "estado_norm": None}
         rs, rc, ctitle = build_rankings(new_view)
         return get_brazil_fig(), new_view, "Visão Brasil", rs, rc, ctitle
-    except Exception as exc:
-        print("[CALLBACK_ERROR] update_map failed:", repr(exc))
-        print(traceback.format_exc())
-        return (
-            error_figure(f"Erro no callback: {exc}"),
-            {"level": "br", "estado_norm": None},
-            "Erro no callback",
-            [html.Li("Falha ao montar ranking de estados")],
-            [html.Li("Falha ao montar ranking de cidades")],
-            "Top 10 Cidades",
-        )
+
+    if view["level"] == "br" and clickData:
+        try:
+            point = clickData["points"][0]
+            estado_norm = None
+
+            if point.get("customdata"):
+                raw = point["customdata"]
+                if isinstance(raw, (list, tuple)):
+                    estado_norm = raw[0]
+                else:
+                    estado_norm = raw
+            elif point.get("location") is not None:
+                location = str(point["location"])
+                match = states_df[states_df["geo_id"] == location]
+                if not match.empty:
+                    estado_norm = match.iloc[0]["state_name_norm"]
+
+            if estado_norm:
+                fig = get_state_fig(estado_norm)
+                new_view = {"level": "state", "estado_norm": estado_norm}
+                rs, rc, ctitle = build_rankings(new_view)
+                return fig, new_view, "Visão Estado (clique em Voltar para Brasil)", rs, rc, ctitle
+        except Exception:
+            pass
+
+    if view["level"] == "state" and view["estado_norm"]:
+        fig = get_state_fig(view["estado_norm"])
+        rs, rc, ctitle = build_rankings(view)
+        return fig, view, "Visão Estado (clique em Voltar para Brasil)", rs, rc, ctitle
+
+    new_view = {"level": "br", "estado_norm": None}
+    rs, rc, ctitle = build_rankings(new_view)
+    return get_brazil_fig(), new_view, "Visão Brasil", rs, rc, ctitle
 
 
 if __name__ == "__main__":
